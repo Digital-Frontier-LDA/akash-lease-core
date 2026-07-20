@@ -73,37 +73,53 @@ class TestParseResultRawInt32:
     def test_negative(self):
         assert parse_result_exit_code(struct.pack("<i", -2)) == -2
 
-    def test_four_byte_json_is_still_json(self):
-        # `{}` padded to 4 bytes must not be mistaken for an int32.
-        assert parse_result_exit_code(b"{ } ", default=-1) == -1
+    def test_four_byte_json_is_not_mistaken_for_int32(self):
+        """A 4-byte payload that parses as JSON takes the JSON path.
+
+        `b"{ } "` is exactly 4 bytes AND valid JSON for `{}` — it must be read
+        as a keyless (therefore malformed) result frame, never as an int32.
+        """
+        with pytest.raises(MalformedResultFrame):
+            parse_result_exit_code(b"{ } ")
 
 
-class TestParseResultLenientVsStrict:
-    """The two consumers disagreed; both behaviours must remain available."""
+class TestParseResultCanonical:
+    """ONE behaviour, no flags: anything unparseable raises.
 
-    BAD = [
+    v0.1.0 shipped strict/default flags so each consumer could keep its prior
+    behaviour. A side-by-side measurement showed one of those behaviours was a
+    BUG (a keyless frame returning 0 = success), so v0.2.0 prescribes a single
+    canonical semantics and consumers converge to it.
+    """
+
+    MALFORMED = [
         b"not json",
         b"[1,2]",
-        json.dumps({"other": 1}).encode(),
-        json.dumps({"exit_code": "0"}).encode(),
-        json.dumps({"exit_code": None}).encode(),
+        json.dumps({"other": 1}).encode(),  # missing exit_code
+        json.dumps({"exit_code": None}).encode(),  # null
+        json.dumps({"exit_code": "7"}).encode(),  # no int() coercion
+        json.dumps({"exit_code": True}).encode(),  # bool is not an exit code
+        json.dumps({"exit_code": "abc"}).encode(),
+        b"\x00\x00\x00\x00\x00",  # 5 bytes: not the 4-byte form
     ]
 
-    @pytest.mark.parametrize("payload", BAD)
-    def test_lenient_returns_default(self, payload):
-        assert parse_result_exit_code(payload) == -1
-
-    @pytest.mark.parametrize("payload", BAD)
-    def test_strict_raises(self, payload):
+    @pytest.mark.parametrize("payload", MALFORMED)
+    def test_malformed_raises(self, payload):
         with pytest.raises(MalformedResultFrame):
-            parse_result_exit_code(payload, strict=True)
+            parse_result_exit_code(payload)
 
-    def test_custom_default(self):
-        assert parse_result_exit_code(b"not json", default=0) == 0
+    def test_keyless_frame_is_never_a_silent_success(self):
+        """The bug this release exists to fix: `{}` must not read as exit 0.
 
-    def test_bool_is_not_an_exit_code(self):
-        # bool subclasses int — must be rejected, not silently read as 1/0.
-        assert parse_result_exit_code(json.dumps({"exit_code": True}).encode()) == -1
+        The closed-lease failure mode emits {"exit_code": 0} with the key
+        PRESENT, so a keyless frame is a distinct, unexplained condition.
+        """
+        with pytest.raises(MalformedResultFrame):
+            parse_result_exit_code(b"{}")
+
+    def test_int32_is_signed(self):
+        """0xFFFFFFFF is -1 (an error), not 4294967295 (a garbage exit code)."""
+        assert parse_result_exit_code(b"\xff\xff\xff\xff") == -1
 
 
 class TestDirectProviderUrl:
@@ -145,18 +161,30 @@ class TestStdinThreshold:
 
 
 class TestProxyEnvelope:
-    def test_minimal(self):
-        m = build_proxy_connect_message("wss://p/lease/1/1/1/shell")
-        assert m == {"type": "websocket", "url": "wss://p/lease/1/1/1/shell"}
+    """The envelope shape is dictated by the Console proxy, not by us.
 
-    def test_with_jwt(self):
-        m = build_proxy_connect_message("wss://p/x", jwt="tok")
-        assert m["auth"] == {"jwt": "tok"}
+    v0.1.0 got this wrong (no providerAddress, no isBase64, and auth as
+    {"jwt": ...}). These assertions pin the real shape.
+    """
+
+    def test_real_envelope_shape(self):
+        m = build_proxy_connect_message("/lease/1/1/1/shell", "tok", "akash1prov")
+        assert m == {
+            "type": "websocket",
+            "url": "/lease/1/1/1/shell",
+            "providerAddress": "akash1prov",
+            "auth": {"type": "jwt", "token": "tok"},
+            "isBase64": True,
+        }
+
+    def test_auth_is_not_the_naive_shape(self):
+        m = build_proxy_connect_message("/x", "tok", "akash1prov")
+        assert m["auth"] != {"jwt": "tok"}, "auth must be {type, token}, not {jwt}"
 
     def test_stdin_is_base64(self):
         import base64
 
-        m = build_proxy_connect_message("wss://p/x", stdin_data="echo hi\n")
+        m = build_proxy_connect_message("/x", "tok", "akash1prov", stdin_data="echo hi\n")
         assert base64.b64decode(m["data"]).decode() == "echo hi\n"
 
 

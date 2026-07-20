@@ -57,7 +57,7 @@ __all__ = [
     "interpret_success",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
@@ -97,62 +97,57 @@ def decode_frame(msg: object) -> tuple[int, bytes] | None:
     return msg[0], bytes(msg[1:])
 
 
-def parse_result_exit_code(
-    payload: bytes,
-    *,
-    strict: bool = False,
-    default: int = -1,
-) -> int:
-    """Parse a RESULT(102) payload into an exit code.
+def parse_result_exit_code(payload: bytes) -> int:
+    """Parse a RESULT(102) payload into an exit code, or raise.
 
-    Accepts **both** observed encodings:
+    Accepts the two encodings the protocol actually uses:
 
-    * a JSON object — ``{"exit_code": N}``
-    * a raw 4-byte little-endian int32
+    * a JSON object — ``{"exit_code": N}`` where N is a real int
+    * a raw **exactly** 4-byte little-endian **signed** int32
 
-    The two existing consumers disagreed on error handling, so both behaviours
-    are available explicitly rather than one being silently imposed:
+    Everything else raises :class:`MalformedResultFrame`. There is deliberately
+    **one** behaviour and no compatibility flags: ``rc == 0`` is not a
+    trustworthy success signal, so a frame we cannot parse must surface as an
+    error rather than masquerade as ``0``. In particular a frame with a missing
+    or null ``exit_code`` is corruption, NOT a success — note that the
+    closed-lease failure mode emits ``{"exit_code": 0}`` with the key *present*,
+    so a keyless frame is a distinct, unexplained condition.
 
-    * ``strict=False`` (default) — return ``default`` (``-1``) for a malformed
-      payload. This is the fail-open behaviour a service wants when the call
-      must never raise.
-    * ``strict=True`` — raise :class:`MalformedResultFrame`. This is the
-      fail-loud behaviour a CLI wants, where a corrupt frame is a real defect
-      and silently reporting ``-1`` would look like a normal command failure.
-
-    ``default`` also controls the missing-key case: a JSON object without an
-    ``exit_code`` key yields ``default`` (or raises under ``strict``).
+    No ``int()`` coercion: ``{"exit_code": "7"}`` or ``true`` is a malformed
+    frame, and silently coercing it turns nonsense into a plausible exit code.
     """
-    # Raw 4-byte little-endian int32 (no JSON envelope).
-    if len(payload) == 4 and not payload.lstrip().startswith(b"{"):
+    try:
+        parsed = json.loads(payload)
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError are both ValueError
+        parsed = None
+
+    if isinstance(parsed, dict):
+        if "exit_code" not in parsed:
+            raise MalformedResultFrame(
+                f"result frame has no exit_code (a keyless frame is corruption, "
+                f"not a success): {payload!r}"
+            )
+        code = parsed["exit_code"]
+        # bool is an int subclass; an exit code is never True/False.
+        if isinstance(code, bool) or not isinstance(code, int):
+            raise MalformedResultFrame(f"exit_code {code!r} is not an integer")
+        return code
+
+    if parsed is not None:
+        raise MalformedResultFrame(
+            f"result frame JSON is a {type(parsed).__name__}, expected an object with exit_code"
+        )
+
+    # Legacy binary form: EXACTLY 4 bytes, little-endian SIGNED int32. A longer
+    # non-JSON payload is malformed — reading its first 4 bytes would invent an
+    # exit code (e.g. 5 NUL bytes must not become exit 0).
+    if len(payload) == 4:
         return int(struct.unpack("<i", payload)[0])
 
-    try:
-        data = json.loads(payload)
-    except (json.JSONDecodeError, ValueError, TypeError) as exc:
-        if strict:
-            raise MalformedResultFrame(
-                f"result frame is neither JSON nor a 4-byte LE int32: {payload!r}"
-            ) from exc
-        return default
-
-    if not isinstance(data, dict):
-        if strict:
-            raise MalformedResultFrame(f"result frame is not an object: {payload!r}")
-        return default
-
-    if "exit_code" not in data:
-        if strict:
-            raise MalformedResultFrame(f"result frame has no exit_code: {payload!r}")
-        return default
-
-    code = data["exit_code"]
-    # bool is an int subclass — reject it, an exit code is never True/False.
-    if isinstance(code, bool) or not isinstance(code, int):
-        if strict:
-            raise MalformedResultFrame(f"exit_code {code!r} is not an integer")
-        return default
-    return code
+    raise MalformedResultFrame(
+        f"result frame: {len(payload)} byte(s), could not parse an exit code "
+        '(expected JSON {"exit_code": N} or a 4-byte LE int32)'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -187,18 +182,25 @@ def build_direct_provider_ws_url(
 # Wire path B — Console provider-proxy
 # ---------------------------------------------------------------------------
 def build_proxy_connect_message(
-    provider_ws_url: str,
-    jwt: str | None = None,
+    shell_path: str,
+    jwt: str,
+    provider_address: str,
     stdin_data: str | None = None,
 ) -> dict:
     """Build the JSON envelope the Console provider-proxy expects on connect.
 
-    The proxy relays to *provider_ws_url*; ``data`` carries optional base64
-    stdin. Returned as a dict so the caller decides how to serialise and send.
+    Shape is dictated by the proxy, not by us — ``providerAddress`` and
+    ``isBase64`` are required, and ``auth`` is ``{"type": "jwt", "token": ...}``
+    (NOT ``{"jwt": ...}``). Returned as a dict so the caller decides how to
+    serialise it.
     """
-    msg: dict = {"type": "websocket", "url": provider_ws_url}
-    if jwt:
-        msg["auth"] = {"jwt": jwt}
+    msg: dict = {
+        "type": "websocket",
+        "url": shell_path,
+        "providerAddress": provider_address,
+        "auth": {"type": "jwt", "token": jwt},
+        "isBase64": True,
+    }
     if stdin_data is not None:
         msg["data"] = base64.b64encode(stdin_data.encode("utf-8")).decode("ascii")
     return msg
