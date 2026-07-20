@@ -79,6 +79,12 @@ class MalformedResultFrame(ValueError):
     """A RESULT(102) payload could not be parsed into an exit code."""
 
 
+# Distinct sentinel for "JSON parsing failed". `None` cannot be used: b"null" is
+# VALID JSON that parses to None *and* is exactly 4 bytes, so a None sentinel
+# lets it fall through to the int32 branch and return a bogus 1819047278.
+_JSON_PARSE_FAILED = object()
+
+
 def _join(command: str | list[str]) -> str:
     return " ".join(command) if isinstance(command, list) else command
 
@@ -119,7 +125,7 @@ def parse_result_exit_code(payload: bytes) -> int:
     try:
         parsed = json.loads(payload)
     except ValueError:  # JSONDecodeError and UnicodeDecodeError are both ValueError
-        parsed = None
+        parsed = _JSON_PARSE_FAILED
 
     if isinstance(parsed, dict):
         if "exit_code" not in parsed:
@@ -133,7 +139,9 @@ def parse_result_exit_code(payload: bytes) -> int:
             raise MalformedResultFrame(f"exit_code {code!r} is not an integer")
         return code
 
-    if parsed is not None:
+    if parsed is not _JSON_PARSE_FAILED:
+        # Valid JSON but not a result object — including the literal `null`,
+        # which must NOT reach the 4-byte branch below.
         raise MalformedResultFrame(
             f"result frame JSON is a {type(parsed).__name__}, expected an object with exit_code"
         )

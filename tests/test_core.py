@@ -84,7 +84,7 @@ class TestParseResultRawInt32:
 
 
 class TestParseResultCanonical:
-    """ONE behaviour, no flags: anything unparseable raises.
+    """ONE behaviour, no flags: anything unparsable raises.
 
     v0.1.0 shipped strict/default flags so each consumer could keep its prior
     behaviour. A side-by-side measurement showed one of those behaviours was a
@@ -95,6 +95,7 @@ class TestParseResultCanonical:
     MALFORMED = [
         b"not json",
         b"[1,2]",
+        b"null",  # valid JSON -> None, AND exactly 4 bytes: must not hit the int32 path
         json.dumps({"other": 1}).encode(),  # missing exit_code
         json.dumps({"exit_code": None}).encode(),  # null
         json.dumps({"exit_code": "7"}).encode(),  # no int() coercion
