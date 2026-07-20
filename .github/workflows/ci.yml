@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both consumers must be able to adopt this: just-akash targets >=3.10,
+        # the control plane runs 3.11.
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest
+
+      - name: Tests
+        run: pytest -q
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install ruff (pinned to match the consuming repos)
+        run: pip install ruff==0.15.20
+      - run: ruff check src tests
+      - run: ruff format --check src tests
+
+  sans-io-guard:
+    # The whole value of this package is that it has no I/O and no deps.
+    # Fail loudly if either invariant is broken.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Assert zero runtime dependencies
+        run: |
+          python - <<'PY'
+          import re, sys, pathlib
+          t = pathlib.Path("pyproject.toml").read_text()
+          m = re.search(r"^dependencies\s*=\s*\[(.*?)\]", t, re.S | re.M)
+          assert m, "dependencies key not found in pyproject.toml"
+          body = re.sub(r"#.*", "", m.group(1)).strip()
+          assert body == "", f"akash-lease-core must have ZERO runtime deps, found: {body}"
+          print("OK: zero runtime dependencies")
+          PY
+      - name: Assert no networking imports
+        run: |
+          if grep -nE "^\s*(import|from)\s+(socket|ssl|asyncio|websockets|requests|httpx)\b" \
+               src/akash_lease_core/*.py; then
+            echo "::error::sans-I/O invariant violated — networking import in core"
+            exit 1
+          fi
+          echo "OK: no networking imports"

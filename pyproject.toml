@@ -1,0 +1,43 @@
+[project]
+name = "akash-lease-core"
+version = "0.1.0"
+description = "Sans-I/O core for the Akash provider lease-shell wire protocol — frame codec, URL builders, and trustworthy exec result semantics."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Jonathan Borduas" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: System :: Networking",
+]
+# Intentionally EMPTY. This package is sans-I/O: stdlib only, no networking
+# dependency. Adding one is a design regression — see README "Invariants".
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Digital-Frontier-LDA/akash-lease-core"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/akash_lease_core"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 99
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Test code: assert-based tests (S101) and /tmp-style fixture paths (S108) are
+# expected and are not part of the shipped attack surface. Matches the
+# convention in the sibling just-akash repo.
+"tests/**" = ["S"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
