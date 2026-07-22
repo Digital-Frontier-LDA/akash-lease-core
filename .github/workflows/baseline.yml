@@ -1,0 +1,38 @@
+# Org baseline conformance — copy this to `.github/workflows/baseline.yml` in a
+# consumer repo. This is the ENTIRE integration; nothing is vendored.
+#
+# Pin the tag (never `@main`): a branch ref means every push to df-cicd changes what
+# your CI executes, with no release in between — the same rule this check enforces on
+# your workflows applies to this one. Pinning also matters for correctness here: a
+# composite action is checked out AT THE PINNED REF, so the rules you run are the
+# rules of the tag you chose.
+#
+# Rollout, in two steps:
+#   1. Adopt with `advisory-only: "true"`. CI stays green while the conformance record
+#      is still published for the org matrix — adoption is never blocked by findings
+#      that predate it.
+#   2. Once the repo's row is green, drop the input so it gates.
+name: Baseline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Drift watch: a repo conformant at merge can stop being so when an action tag
+    # moves or a secret is added. Weekly catches it before the next release.
+    - cron: "0 7 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  conformance:
+    name: Baseline conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      # No `advisory-only`: this repo is already conformant (0 required findings at
+      # adoption), so it gates from day one rather than carrying a crutch it does not
+      # need. A repo that is NOT yet conformant adopts with advisory-only: "true".
+      - uses: Digital-Frontier-LDA/df-cicd/.github/actions/conformance@v2.0.0
