@@ -1,0 +1,24 @@
+# The companion to SHA-pinned actions. Pinning without update PRs is not a complete
+# fix — it trades a supply-chain risk for a staleness one, which is how these
+# migrations rot. Dependabot raises a PR when an action publishes a release, so a
+# pinned SHA stays current by review rather than by nobody noticing.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(actions)"
+    # A freshly published release is when a compromised or broken version is live and
+    # least likely to have been noticed. An Action runs inside the job with its token
+    # and secrets, so this matters more here than for library dependencies.
+    cooldown:
+      default-days: 7
+    groups:
+      # One PR for routine first-party bumps, so a surprising update to a
+      # security-scanning action is not buried among checkout/setup churn.
+      github-official:
+        patterns: ["actions/*"]
