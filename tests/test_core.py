@@ -506,3 +506,35 @@ class TestClassifyEnumerationIsComplete:
             if labels[a] == labels[b]
         ]
         assert not collisions, f"these sequences classify identically: {collisions} — {labels}"
+
+
+def test_the_two_declarations_of_the_version_agree():
+    """★ The package states its version TWICE, and a bump touches one of them.
+
+    ⚠ FOUND BY WALKING INTO IT. Bumping `pyproject.toml` for the 0.3.0 release left
+    `__version__` reading "0.2.0" — the wheel would have installed as 0.3.0 while the
+    module it contains introduced itself as 0.2.0.
+
+    That is not cosmetic here. The consumer pins by URL and `#sha256=`, so the wheel is
+    unambiguous, but ANY runtime check — a log line, a compatibility guard, a support
+    question answered from `akash_lease_core.__version__` — reads the copy that did not
+    move. A version that lies is worse than one that is absent: absence prompts a
+    question, a wrong answer ends the enquiry.
+
+    Same shape as the two requirements pins in the consumer repo: one fact, two
+    declarations, each individually valid, and nothing asserting they agree.
+    """
+    import re
+    from pathlib import Path
+
+    import akash_lease_core
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
+    assert match, "pyproject.toml no longer declares a version — this test's premise moved"
+
+    assert match.group(1) == akash_lease_core.__version__, (
+        f"pyproject.toml says {match.group(1)} and __version__ says "
+        f"{akash_lease_core.__version__}. A release bumps one of these; nothing but this "
+        "assertion notices when it does not bump the other."
+    )
