@@ -18,12 +18,9 @@ from akash_lease_core import (
     STDERR,
     STDIN,
     STDOUT,
-    MalformedResultFrame,
-    FrameTrace,
     TRACE_ENV,
-    STDOUT,
-    STDERR,
-    RESULT,
+    FrameTrace,
+    MalformedResultFrame,
     build_direct_provider_ws_url,
     build_proxy_connect_message,
     command_needs_stdin_delivery,
@@ -420,3 +417,92 @@ class TestCloseDiscriminator:
         t = FrameTrace(enabled=True)
         t.record_parts(RESULT, 15)
         assert "close=n/a@n/a" in t.render()
+
+
+class TestClassifyEnumerationIsComplete:
+    """Every label `classify()` can return must be produced by a real sequence.
+
+    ★ WHY `len(seen) >= 5` IS NOT THIS TEST. A lower bound says the classifier is not
+    single-valued. It cannot say whether a label exists that NO sequence in the corpus
+    reaches — and an unreached branch is the dangerous one: it will be read for the first
+    time in production, on the run that matters, with no fixture ever having exercised it.
+    `reorder` was exactly that for a while on the consumer side — a branch the real client
+    could not reach, so the classifier had an answer nobody could ever see.
+
+    The declared set is read out of the FUNCTION, not listed here, so a label added
+    without a fixture fails on the day it is added rather than the day it is needed.
+    """
+
+    @staticmethod
+    def _declared() -> set:
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(FrameTrace.classify)))
+        return {
+            n.value.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Return)
+            and isinstance(n.value, ast.Constant)
+            and isinstance(n.value.value, str)
+        }
+
+    @staticmethod
+    def _corpus() -> dict:
+        def trace(frames, enabled=True):
+            t = FrameTrace(enabled=enabled)
+            for code, length in frames:
+                t.record_parts(code, length)
+            return t
+
+        return {
+            "tracing off": trace([], enabled=False),
+            "nothing arrived": trace([]),
+            "stdout then result": trace([(STDOUT, 12), (RESULT, 15)]),
+            "result then stdout (drain recovery)": trace([(RESULT, 15), (STDOUT, 12)]),
+            "a lone small result": trace([(RESULT, 15)]),
+            "stderr then result": trace([(STDERR, 20), (RESULT, 15)]),
+            "stderr, session ended": trace([(STDERR, 20)]),
+        }
+
+    def test_the_declared_set_was_actually_read(self):
+        """Control. An empty declared set makes the comparison below vacuous."""
+        declared = self._declared()
+        assert len(declared) >= 5, (
+            f"only {declared} read out of classify() — the AST reader is stale"
+        )
+
+    def test_every_label_the_classifier_can_return_has_a_sequence_that_produces_it(self):
+        declared = self._declared()
+        produced = {t.classify() for t in self._corpus().values()}
+
+        unreached = sorted(declared - produced)
+        assert not unreached, (
+            f"classify() can return {unreached}, and no sequence in the corpus produces "
+            "them. An unexercised branch is read for the first time in production, on the "
+            "run that matters. Add a sequence that reaches it, or delete the branch."
+        )
+        invented = sorted(produced - declared)
+        assert not invented, (
+            f"the corpus produced {invented}, which the AST reader did not find among "
+            "classify()'s returns — the reader is missing a return path, so 'unreached' "
+            "above is measured against an incomplete declaration."
+        )
+
+    def test_distinct_sequences_stay_distinct(self):
+        """The corpus is chosen so no two entries may share a label.
+
+        ⚠ Each pair here is a decision someone makes differently: a drop is the provider's
+        problem, a reorder is ours, a lone small result is a dead lease. If two of them
+        ever answer the same, the classifier has stopped being a classifier — and the
+        assertion above would still pass, because every label would still be produced.
+        """
+        labels = {name: t.classify() for name, t in self._corpus().items()}
+        collisions = [
+            (a, b)
+            for i, a in enumerate(labels)
+            for b in list(labels)[i + 1 :]
+            if labels[a] == labels[b]
+        ]
+        assert not collisions, f"these sequences classify identically: {collisions} — {labels}"

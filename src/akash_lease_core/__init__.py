@@ -36,8 +36,8 @@ import base64
 import binascii
 import json
 import os
-import time
 import struct
+import time
 import urllib.parse
 
 __all__ = [
@@ -329,11 +329,12 @@ class FrameTrace:
     def render(self, recovered: int = 0) -> str:
         """The one-line summary. Called AFTER the receive loop, never inside it."""
         tr = f"{self.t_result:.3f}s" if self.t_result is not None else "none"
+        at = self.close_at if self.close_at is not None else "n/a"
         return (
             f"[lease-shell] FRAME-TRACE shape=[{self.shape()}] "
             f"stdout_bytes={self.stdout_bytes()} recovered={recovered} "
             f"t_result={tr} classify={self.classify()} "
-            f"close={self.close_reason or 'n/a'}@{self.close_at if self.close_at is not None else 'n/a'} "
+            f"close={self.close_reason or 'n/a'}@{at} "
             f"frames={self.frames}"
         )
 
