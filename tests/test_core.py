@@ -19,6 +19,11 @@ from akash_lease_core import (
     STDIN,
     STDOUT,
     MalformedResultFrame,
+    FrameTrace,
+    TRACE_ENV,
+    STDOUT,
+    STDERR,
+    RESULT,
     build_direct_provider_ws_url,
     build_proxy_connect_message,
     command_needs_stdin_delivery,
@@ -256,3 +261,116 @@ class TestSansIOInvariant:
             "import httpx",
         ):
             assert banned not in src, f"sans-I/O violated: {banned}"
+
+
+class TestFrameTrace:
+    """The instrument that separates drop / reorder / synthetic-zero / no-result."""
+
+    @staticmethod
+    def _f(code: int, payload: bytes = b"x") -> bytes:
+        return bytes([code]) + payload
+
+    def test_disabled_by_default_and_records_nothing(self):
+        t = FrameTrace(enabled=False)
+        t.record(self._f(STDOUT, b"hello"))
+        assert not t.enabled
+        assert t.frames == []
+        assert t.classify() == "not_traced"
+
+    def test_env_opt_in(self, monkeypatch):
+        monkeypatch.setenv(TRACE_ENV, "1")
+        assert FrameTrace().enabled
+        for off in ("0", ""):
+            monkeypatch.setenv(TRACE_ENV, off)
+            assert not FrameTrace().enabled, f"{off!r} should not enable tracing"
+        monkeypatch.delenv(TRACE_ENV, raising=False)
+        assert not FrameTrace().enabled
+
+    def test_records_code_and_length_but_NEVER_payload(self):
+        """⛔ Payload bytes must never enter the trace — commands carry secrets."""
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDOUT, b"super-secret-token"))
+        (code, ln, rel), = t.frames
+        assert code == STDOUT and ln == len(b"super-secret-token")
+        assert "super-secret" not in t.render(), "payload leaked into the rendered line"
+        assert all(isinstance(x, (int, float)) for x in (code, ln, rel))
+
+    def test_healthy_shape(self):
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDOUT, b"out"))
+        t.record(self._f(RESULT, b'{"exit_code":0}'))
+        assert t.shape() == "stdout,result"
+        assert t.stdout_bytes() == 3
+        assert t.classify() == "stdout_present"
+        assert t.t_result is not None
+
+    def test_a_lone_small_result_is_flagged(self):
+        """The synthetic-zero SHAPE: one ~16-byte result frame, no stdout ever."""
+        t = FrameTrace(enabled=True)
+        t.record(self._f(RESULT, b'{"exit_code":0}'))
+        assert t.classify() == "lone_small_result"
+        assert t.stdout_bytes() == 0
+
+    def test_a_reorder_is_distinguished_from_a_drop(self):
+        """★ THE DISCRIMINATION THIS EXISTS FOR — same outcome, different mechanism."""
+        drop = FrameTrace(enabled=True)
+        drop.record(self._f(RESULT, b'{"exit_code":0}'))
+        drop.record(self._f(STDERR, b"e"))
+        assert drop.classify() == "no_stdout_frame"
+
+        reorder = FrameTrace(enabled=True)
+        reorder.record(self._f(RESULT, b'{"exit_code":0}'))
+        reorder.record(self._f(STDOUT, b"late"))
+        assert reorder.classify() == "reorder"
+        assert drop.classify() != reorder.classify(), (
+            "a drop and a reorder classify identically — the instrument cannot do its job"
+        )
+
+    def test_no_result_frame_is_its_own_state(self):
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDERR, b"boom"))
+        assert t.classify() == "no_result_frame"
+        assert t.t_result is None
+
+    def test_no_frames_at_all(self):
+        assert FrameTrace(enabled=True).classify() == "no_frames"
+
+    def test_classify_is_not_a_single_valued_function(self):
+        """★ NON-VACUITY. A classifier answering one label always would satisfy every
+        assertion above that only checks 'not equal to the other one'."""
+        seen = set()
+        for frames in ([(STDOUT, b"o"), (RESULT, b"r")], [(RESULT, b"r")],
+                       [(RESULT, b"r"), (STDOUT, b"o")], [(STDERR, b"e")], []):
+            t = FrameTrace(enabled=True)
+            for c, p in frames:
+                t.record(self._f(c, p))
+            seen.add(t.classify())
+        assert len(seen) >= 5, f"classify() collapses distinct sequences: {seen}"
+
+    def test_render_is_deferred_and_self_describing(self):
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDOUT, b"ab"))
+        t.record(self._f(RESULT, b'{"exit_code":0}'))
+        line = t.render(recovered=2)
+        for token in ("FRAME-TRACE", "shape=[stdout,result]", "stdout_bytes=2",
+                      "recovered=2", "classify=stdout_present", "t_result="):
+            assert token in line, f"{token!r} missing from: {line}"
+
+
+class TestRecordParts:
+    def test_record_parts_matches_record(self):
+        a, b = FrameTrace(enabled=True), FrameTrace(enabled=True)
+        a.record(bytes([STDOUT]) + b"hello")
+        b.record_parts(STDOUT, len(b"hello"))
+        assert [(c, ln) for c, ln, _ in a.frames] == [(c, ln) for c, ln, _ in b.frames]
+        assert a.classify() == b.classify() == "stdout_present"
+
+    def test_record_parts_is_a_noop_when_disabled(self):
+        t = FrameTrace(enabled=False)
+        t.record_parts(STDOUT, 999)
+        assert t.frames == [] and t.classify() == "not_traced"
+
+    def test_record_parts_sets_t_result(self):
+        t = FrameTrace(enabled=True)
+        t.record_parts(RESULT, 15)
+        assert t.t_result is not None and t.classify() == "lone_small_result"
