@@ -134,9 +134,72 @@ class TestDirectProviderUrl:
         assert "cmd2=echo%20hi" in url
         assert "service=web" in url
 
-    def test_list_command_joined(self):
+    def test_list_command_is_argv_one_param_per_element(self):
+        """A list is argv. It gets one cmdN each and NO shell wrapper.
+
+        This replaces test_list_command_joined, which asserted
+        `cmd2=ls%20-la%20%2Ftmp` -- i.e. it pinned the defect as the contract. That is
+        why the bug survived two releases with a green suite.
+        """
         url = build_direct_provider_ws_url("h:1", "1", "1", "1", "svc", ["ls", "-la", "/tmp"])
-        assert "cmd2=ls%20-la%20%2Ftmp" in url
+        assert "cmd0=ls" in url
+        assert "cmd1=-la" in url
+        assert "cmd2=%2Ftmp" in url
+        assert "cmd2=ls%20-la%20%2Ftmp" not in url, "the old space-joined shape came back"
+
+    def test_sh_dash_c_is_not_wrapped_a_second_time(self):
+        """THE DEFECT, stated as its round trip.
+
+        `["sh","-c","echo hi"]` used to become `/bin/sh -c "sh -c echo hi"`, where the
+        inner `sh -c` took only `echo` as its command and `hi` became a positional
+        parameter. Any caller shipping a script this way ran its first word and nothing
+        else.
+        """
+        url = build_direct_provider_ws_url("h:1", "1", "1", "1", "svc", ["sh", "-c", "echo hi"])
+        assert "cmd0=sh" in url
+        assert "cmd1=-c" in url
+        assert "cmd2=echo%20hi" in url
+        assert "cmd0=%2Fbin%2Fsh" not in url, "a list must not be wrapped in /bin/sh -c"
+        assert "cmd3=" not in url, "a nested wrap would have pushed the argv along by two"
+
+    def test_argv_boundaries_survive_an_element_containing_spaces(self):
+        """The space-join did not merely wrap twice -- it also re-split arguments.
+
+        `["echo", "a b"]` must stay TWO parameters. Under the join it became the string
+        `echo a b`, which the shell then re-split into three words, so an argument with
+        a space silently became two arguments.
+        """
+        url = build_direct_provider_ws_url("h:1", "1", "1", "1", "svc", ["echo", "a b"])
+        assert "cmd0=echo" in url
+        assert "cmd1=a%20b" in url
+        assert "cmd2=" not in url
+
+    def test_string_command_keeps_its_shell_wrapper(self):
+        """BACKWARD COMPATIBILITY CONTROL -- and it is the reason the string branch stayed.
+
+        A string is a shell command LINE, so wrapping it is correct and unchanged. Only
+        the list branch was wrong. Removing this wrapper would break every string caller
+        AND drop shell builtins (`kill` is a builtin; a distroless image has no
+        /bin/kill), which is precisely the risk that made this a decision rather than a
+        default.
+        """
+        url = build_direct_provider_ws_url("h:1", "1", "1", "1", "svc", "kill -9 1")
+        assert "cmd0=%2Fbin%2Fsh" in url
+        assert "cmd1=-c" in url
+        assert "cmd2=kill%20-9%201" in url
+
+    def test_list_stdin_threshold_measures_the_encoded_payload(self):
+        """A list's size is what its cmdN values cost, not a space-joined guess."""
+        assert command_needs_stdin_delivery(["a" * MAX_URL_CMD_BYTES]) is False
+        assert command_needs_stdin_delivery(["a" * MAX_URL_CMD_BYTES, "b"]) is True
+
+    def test_oversized_list_still_falls_back_to_the_interactive_shell(self):
+        """The STDIN path exists for URL LENGTH and is not what this change touches."""
+        url = build_direct_provider_ws_url(
+            "h:1", "1", "1", "1", "s", ["sh", "-c", "a" * (MAX_URL_CMD_BYTES + 10)]
+        )
+        assert "cmd0=%2Fbin%2Fsh" in url
+        assert "cmd1=" not in url
 
     def test_oversized_drops_cmd2(self):
         url = build_direct_provider_ws_url(
@@ -287,7 +350,7 @@ class TestFrameTrace:
         """⛔ Payload bytes must never enter the trace — commands carry secrets."""
         t = FrameTrace(enabled=True)
         t.record(self._f(STDOUT, b"super-secret-token"))
-        (code, ln, rel), = t.frames
+        ((code, ln, rel),) = t.frames
         assert code == STDOUT and ln == len(b"super-secret-token")
         assert "super-secret" not in t.render(), "payload leaked into the rendered line"
         assert all(isinstance(x, (int, float)) for x in (code, ln, rel))
@@ -336,8 +399,13 @@ class TestFrameTrace:
         """★ NON-VACUITY. A classifier answering one label always would satisfy every
         assertion above that only checks 'not equal to the other one'."""
         seen = set()
-        for frames in ([(STDOUT, b"o"), (RESULT, b"r")], [(RESULT, b"r")],
-                       [(RESULT, b"r"), (STDOUT, b"o")], [(STDERR, b"e")], []):
+        for frames in (
+            [(STDOUT, b"o"), (RESULT, b"r")],
+            [(RESULT, b"r")],
+            [(RESULT, b"r"), (STDOUT, b"o")],
+            [(STDERR, b"e")],
+            [],
+        ):
             t = FrameTrace(enabled=True)
             for c, p in frames:
                 t.record(self._f(c, p))
@@ -349,8 +417,14 @@ class TestFrameTrace:
         t.record(self._f(STDOUT, b"ab"))
         t.record(self._f(RESULT, b'{"exit_code":0}'))
         line = t.render(recovered=2)
-        for token in ("FRAME-TRACE", "shape=[stdout,result]", "stdout_bytes=2",
-                      "recovered=2", "classify=stdout_present", "t_result="):
+        for token in (
+            "FRAME-TRACE",
+            "shape=[stdout,result]",
+            "stdout_bytes=2",
+            "recovered=2",
+            "classify=stdout_present",
+            "t_result=",
+        ):
             assert token in line, f"{token!r} missing from: {line}"
 
 

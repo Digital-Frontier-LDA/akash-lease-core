@@ -89,10 +89,6 @@ class MalformedResultFrame(ValueError):
 _JSON_PARSE_FAILED = object()
 
 
-def _join(command: str | list[str]) -> str:
-    return " ".join(command) if isinstance(command, list) else command
-
-
 # ---------------------------------------------------------------------------
 # Frame codec
 # ---------------------------------------------------------------------------
@@ -165,9 +161,49 @@ def parse_result_exit_code(payload: bytes) -> int:
 # ---------------------------------------------------------------------------
 # Wire path A — direct to provider
 # ---------------------------------------------------------------------------
+def _argv_params(command: str | list[str]) -> list[str]:
+    """The ``cmdN=`` parameters for *command*, one per argv element.
+
+    A LIST is argv and is passed through verbatim -- ``["sh","-c","echo hi"]`` becomes
+    ``cmd0=sh&cmd1=-c&cmd2=echo%20hi``. A STRING is a shell command LINE, so it keeps the
+    ``/bin/sh -c`` wrapper it has always had.
+
+    ⛔ THE LIST CASE IS THE BUG THIS REPLACES. Previously every command -- list or string
+    -- was space-joined and jammed into ``cmd2`` behind a hardcoded ``cmd0=/bin/sh
+    cmd1=-c``. A caller passing ``["sh","-c", script]`` therefore got
+
+        /bin/sh -c "sh -c <script...>"
+
+    and the inner ``sh -c`` took only the script's FIRST WORD as its command, with the
+    rest becoming positional parameters. The space-join also destroyed argv boundaries
+    outright, so any element containing a space was silently re-split.
+
+    Shape ported from ``akash-network/console``, ``provider-proxy.service.ts:341``:
+    one ``cmdN`` per element, no hardcoded shell.
+    """
+    argv = command if isinstance(command, list) else ["/bin/sh", "-c", command]
+    return [f"cmd{i}={urllib.parse.quote(arg, safe='')}" for i, arg in enumerate(argv)]
+
+
 def command_needs_stdin_delivery(command: str | list[str]) -> bool:
-    """True if *command* is too large to carry in the URL and must use STDIN."""
-    return len(urllib.parse.quote(_join(command), safe="")) > MAX_URL_CMD_BYTES
+    """True if *command* is too large to carry in the URL and must use STDIN.
+
+    Measured on the encoded ``cmdN`` payload the URL will actually carry, so a list and
+    the equivalent string are judged on what they cost on the wire rather than on a
+    space-joined approximation of it.
+    """
+    return _cmd_payload_len(command) > MAX_URL_CMD_BYTES
+
+
+def _cmd_payload_len(command: str | list[str]) -> int:
+    """Encoded length of the command as it rides the URL, excluding the ``cmdN=`` keys.
+
+    For a string this is exactly the old measure (``quote(command)``), so the documented
+    MAX_URL_CMD_BYTES boundary and its off-by-one tests are unchanged for that shape.
+    """
+    if isinstance(command, list):
+        return sum(len(urllib.parse.quote(arg, safe="")) for arg in command)
+    return len(urllib.parse.quote(command, safe=""))
 
 
 def build_direct_provider_ws_url(
@@ -183,10 +219,12 @@ def build_direct_provider_ws_url(
     Oversized commands get an interactive ``/bin/sh`` URL (no ``cmd2``); the
     caller must then deliver the command over STDIN (code 104).
     """
-    encoded_cmd = urllib.parse.quote(_join(command), safe="")
     base = f"wss://{provider_host}/lease/{dseq}/{gseq}/{oseq}/shell?stdin=1&tty=0&podIndex=0"
-    if len(encoded_cmd) <= MAX_URL_CMD_BYTES:
-        return f"{base}&cmd0=%2Fbin%2Fsh&cmd1=-c&cmd2={encoded_cmd}&service={service_name}"
+    if _cmd_payload_len(command) <= MAX_URL_CMD_BYTES:
+        params = "&".join(_argv_params(command))
+        return f"{base}&{params}&service={service_name}"
+    # Oversized: an interactive shell with no command. The caller delivers it over STDIN
+    # (code 104). Unchanged -- this path exists for URL length, not for quoting.
     return f"{base}&cmd0=%2Fbin%2Fsh&service={service_name}"
 
 
