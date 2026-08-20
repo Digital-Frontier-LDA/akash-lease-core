@@ -35,7 +35,9 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import os
 import struct
+import time
 import urllib.parse
 
 __all__ = [
@@ -50,6 +52,8 @@ __all__ = [
     "decode_frame",
     "parse_result_exit_code",
     "command_needs_stdin_delivery",
+    "FrameTrace",
+    "TRACE_ENV",
     "build_direct_provider_ws_url",
     "build_proxy_connect_message",
     "decode_proxy_payload",
@@ -57,7 +61,7 @@ __all__ = [
     "interpret_success",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
@@ -184,6 +188,155 @@ def build_direct_provider_ws_url(
     if len(encoded_cmd) <= MAX_URL_CMD_BYTES:
         return f"{base}&cmd0=%2Fbin%2Fsh&cmd1=-c&cmd2={encoded_cmd}&service={service_name}"
     return f"{base}&cmd0=%2Fbin%2Fsh&service={service_name}"
+
+
+# ---------------------------------------------------------------------------
+# Frame tracing — the instrument that separates drop / reorder / synthetic zero
+# ---------------------------------------------------------------------------
+TRACE_ENV = "AKASH_LEASE_TRACE_FRAMES"
+
+
+class FrameTrace:
+    """Opt-in per-frame record: ``(code, payload_len, rel_time)``.
+
+    ★ WHY THIS EXISTS. ``rc==0`` with empty stdout has at least three candidate
+    mechanisms and they are indistinguishable from the outcome alone:
+
+      * a genuine upstream **DROP** — no ``stdout(100)`` frame ever arrives
+      * a **reorder** — stdout arrives AFTER ``result(102)`` and a drain recovers it
+      * a **synthetic zero** — a lone 16-byte ``{"exit_code": 0}`` result frame and
+        nothing else, which a closed/dead lease returns
+
+    ⇒ Only the frame sequence tells them apart, and nothing in this repo recorded it.
+    An entire night was spent inferring mechanism from CI-log outcomes because the
+    direct instrument did not exist. Ported from just-akash's ``JUST_AKASH_TRACE_FRAMES``
+    (``docs/exec-reliability-investigation.md``), which used it to refute the reorder
+    hypothesis with 240/240 clean control execs.
+
+    ⚠ THE INSTRUMENT MUST NOT PERTURB WHAT IT MEASURES. The residual drop is an upstream
+    teardown race, so:
+
+      * the list is allocated **only** when tracing is enabled — otherwise ``record`` is
+        a single ``is None`` check
+      * only plain appends happen in the receive loop; **no formatting, no I/O**
+      * the human-readable line is rendered **after** the loop returns
+      * ⛔ payload bytes are **never** recorded — only the code and the length
+
+    ⚠ ONE monotonic read per frame, reused for both the tuple and ``t_result``, so a
+    frame's two timestamps cannot disagree.
+    """
+
+    __slots__ = ("_frames", "_t0", "t_result", "close_reason", "close_at")
+
+    def __init__(self, enabled: bool | None = None) -> None:
+        if enabled is None:
+            enabled = os.environ.get(TRACE_ENV) not in (None, "", "0")
+        self._frames: list[tuple[int, int, float]] | None = [] if enabled else None
+        self._t0 = time.monotonic()
+        self.t_result: float | None = None
+        self.close_reason: str | None = None
+        self.close_at: float | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return self._frames is not None
+
+    def record(self, frame: bytes) -> None:
+        """Append ``(code, payload_len, rel_time)``. A no-op when disabled."""
+        if self._frames is None or not frame:
+            return
+        rel = round(time.monotonic() - self._t0, 4)
+        self._frames.append((frame[0], len(frame) - 1, rel))
+        if frame[0] == RESULT and self.t_result is None:
+            self.t_result = rel
+
+    def record_parts(self, code: int, payload_len: int) -> None:
+        """Record an already-decoded frame without rebuilding its bytes.
+
+        ⚠ A caller that has ``(code, payload)`` in hand would otherwise have to do
+        ``record(bytes([code]) + payload)`` — an allocation and a copy of the whole
+        payload, in the receive loop, on every frame. The instrument must not perturb
+        the teardown race it measures, so it must not allocate proportionally to the
+        data it is watching.
+        """
+        if self._frames is None:
+            return
+        rel = round(time.monotonic() - self._t0, 4)
+        self._frames.append((code, payload_len, rel))
+        if code == RESULT and self.t_result is None:
+            self.t_result = rel
+
+    @property
+    def frames(self) -> list[tuple[int, int, float]]:
+        return list(self._frames or ())
+
+    def shape(self) -> str:
+        """Ordered frame names, e.g. ``stdout,result``. ``""`` when nothing arrived."""
+        names = {STDOUT: "stdout", STDERR: "stderr", RESULT: "result", FAILURE: "failure"}
+        return ",".join(names.get(c, str(c)) for c, _, _ in (self._frames or ()))
+
+    def stdout_bytes(self) -> int:
+        return sum(ln for c, ln, _ in (self._frames or ()) if c == STDOUT)
+
+    def classify(self) -> str:
+        """The mechanism the frame sequence is consistent with.
+
+        ⚠ CONSISTENT WITH, NOT PROOF OF. This reads the shape only; a closed lease and a
+        provider that never wrote to stdout produce the same sequence. Pair it with an
+        out-of-band liveness check before attributing a cause — that check is what
+        falsified the reference investigation's own strongest mid-course claim, and its
+        absence is what let a symptom match survive three times in one night here.
+        """
+        if self._frames is None:
+            return "not_traced"
+        if not self._frames:
+            return "no_frames"
+        codes = [c for c, _, _ in self._frames]
+        if STDOUT in codes:
+            first_out = codes.index(STDOUT)
+            if RESULT in codes and codes.index(RESULT) < first_out:
+                return "reorder"
+            return "stdout_present"
+        if codes == [RESULT] and self._frames[0][1] <= 32:
+            return "lone_small_result"
+        if RESULT in codes:
+            return "no_stdout_frame"
+        return "no_result_frame"
+
+    def close(self, reason: str) -> None:
+        """Record WHY the receive loop ended, and when.
+
+        ★ THE DISCRIMINATOR ``classify()`` CANNOT PROVIDE. Two very different failures
+        both yield an empty frame list:
+
+          * the peer closed the connection before sending anything
+          * the loop ended without ever receiving a result frame
+
+        Same shape, different layer — and an ``exit=-1`` with no frames is exactly where
+        that distinction decides the diagnosis. The frame sequence answers "what arrived";
+        only the close answers "why it stopped".
+
+        ⚠ ``rel_time`` here is measured from the same ``t0`` as the frames, so the gap
+        between the last frame and the close is readable directly: a close 0.5s into a
+        30s budget with no frames is a connection-layer event, while a close after a long
+        silence is a timeout.
+        """
+        if self._frames is None:
+            return
+        self.close_reason = reason
+        self.close_at = round(time.monotonic() - self._t0, 4)
+
+    def render(self, recovered: int = 0) -> str:
+        """The one-line summary. Called AFTER the receive loop, never inside it."""
+        tr = f"{self.t_result:.3f}s" if self.t_result is not None else "none"
+        at = self.close_at if self.close_at is not None else "n/a"
+        return (
+            f"[lease-shell] FRAME-TRACE shape=[{self.shape()}] "
+            f"stdout_bytes={self.stdout_bytes()} recovered={recovered} "
+            f"t_result={tr} classify={self.classify()} "
+            f"close={self.close_reason or 'n/a'}@{at} "
+            f"frames={self.frames}"
+        )
 
 
 # ---------------------------------------------------------------------------

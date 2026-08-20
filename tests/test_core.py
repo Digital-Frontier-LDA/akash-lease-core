@@ -18,6 +18,8 @@ from akash_lease_core import (
     STDERR,
     STDIN,
     STDOUT,
+    TRACE_ENV,
+    FrameTrace,
     MalformedResultFrame,
     build_direct_provider_ws_url,
     build_proxy_connect_message,
@@ -256,3 +258,283 @@ class TestSansIOInvariant:
             "import httpx",
         ):
             assert banned not in src, f"sans-I/O violated: {banned}"
+
+
+class TestFrameTrace:
+    """The instrument that separates drop / reorder / synthetic-zero / no-result."""
+
+    @staticmethod
+    def _f(code: int, payload: bytes = b"x") -> bytes:
+        return bytes([code]) + payload
+
+    def test_disabled_by_default_and_records_nothing(self):
+        t = FrameTrace(enabled=False)
+        t.record(self._f(STDOUT, b"hello"))
+        assert not t.enabled
+        assert t.frames == []
+        assert t.classify() == "not_traced"
+
+    def test_env_opt_in(self, monkeypatch):
+        monkeypatch.setenv(TRACE_ENV, "1")
+        assert FrameTrace().enabled
+        for off in ("0", ""):
+            monkeypatch.setenv(TRACE_ENV, off)
+            assert not FrameTrace().enabled, f"{off!r} should not enable tracing"
+        monkeypatch.delenv(TRACE_ENV, raising=False)
+        assert not FrameTrace().enabled
+
+    def test_records_code_and_length_but_NEVER_payload(self):
+        """⛔ Payload bytes must never enter the trace — commands carry secrets."""
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDOUT, b"super-secret-token"))
+        (code, ln, rel), = t.frames
+        assert code == STDOUT and ln == len(b"super-secret-token")
+        assert "super-secret" not in t.render(), "payload leaked into the rendered line"
+        assert all(isinstance(x, (int, float)) for x in (code, ln, rel))
+
+    def test_healthy_shape(self):
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDOUT, b"out"))
+        t.record(self._f(RESULT, b'{"exit_code":0}'))
+        assert t.shape() == "stdout,result"
+        assert t.stdout_bytes() == 3
+        assert t.classify() == "stdout_present"
+        assert t.t_result is not None
+
+    def test_a_lone_small_result_is_flagged(self):
+        """The synthetic-zero SHAPE: one ~16-byte result frame, no stdout ever."""
+        t = FrameTrace(enabled=True)
+        t.record(self._f(RESULT, b'{"exit_code":0}'))
+        assert t.classify() == "lone_small_result"
+        assert t.stdout_bytes() == 0
+
+    def test_a_reorder_is_distinguished_from_a_drop(self):
+        """★ THE DISCRIMINATION THIS EXISTS FOR — same outcome, different mechanism."""
+        drop = FrameTrace(enabled=True)
+        drop.record(self._f(RESULT, b'{"exit_code":0}'))
+        drop.record(self._f(STDERR, b"e"))
+        assert drop.classify() == "no_stdout_frame"
+
+        reorder = FrameTrace(enabled=True)
+        reorder.record(self._f(RESULT, b'{"exit_code":0}'))
+        reorder.record(self._f(STDOUT, b"late"))
+        assert reorder.classify() == "reorder"
+        assert drop.classify() != reorder.classify(), (
+            "a drop and a reorder classify identically — the instrument cannot do its job"
+        )
+
+    def test_no_result_frame_is_its_own_state(self):
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDERR, b"boom"))
+        assert t.classify() == "no_result_frame"
+        assert t.t_result is None
+
+    def test_no_frames_at_all(self):
+        assert FrameTrace(enabled=True).classify() == "no_frames"
+
+    def test_classify_is_not_a_single_valued_function(self):
+        """★ NON-VACUITY. A classifier answering one label always would satisfy every
+        assertion above that only checks 'not equal to the other one'."""
+        seen = set()
+        for frames in ([(STDOUT, b"o"), (RESULT, b"r")], [(RESULT, b"r")],
+                       [(RESULT, b"r"), (STDOUT, b"o")], [(STDERR, b"e")], []):
+            t = FrameTrace(enabled=True)
+            for c, p in frames:
+                t.record(self._f(c, p))
+            seen.add(t.classify())
+        assert len(seen) >= 5, f"classify() collapses distinct sequences: {seen}"
+
+    def test_render_is_deferred_and_self_describing(self):
+        t = FrameTrace(enabled=True)
+        t.record(self._f(STDOUT, b"ab"))
+        t.record(self._f(RESULT, b'{"exit_code":0}'))
+        line = t.render(recovered=2)
+        for token in ("FRAME-TRACE", "shape=[stdout,result]", "stdout_bytes=2",
+                      "recovered=2", "classify=stdout_present", "t_result="):
+            assert token in line, f"{token!r} missing from: {line}"
+
+
+class TestRecordParts:
+    def test_record_parts_matches_record(self):
+        a, b = FrameTrace(enabled=True), FrameTrace(enabled=True)
+        a.record(bytes([STDOUT]) + b"hello")
+        b.record_parts(STDOUT, len(b"hello"))
+        assert [(c, ln) for c, ln, _ in a.frames] == [(c, ln) for c, ln, _ in b.frames]
+        assert a.classify() == b.classify() == "stdout_present"
+
+    def test_record_parts_is_a_noop_when_disabled(self):
+        t = FrameTrace(enabled=False)
+        t.record_parts(STDOUT, 999)
+        assert t.frames == [] and t.classify() == "not_traced"
+
+    def test_record_parts_sets_t_result(self):
+        t = FrameTrace(enabled=True)
+        t.record_parts(RESULT, 15)
+        assert t.t_result is not None and t.classify() == "lone_small_result"
+
+
+class TestCloseDiscriminator:
+    """★ ARCHITECT's two candidates for `exit=-1` BOTH produce zero frames.
+
+    An empty-stderr `-1` can arise where the peer closed the connection, or where the
+    loop ended without a result frame. `classify()` reads what ARRIVED; only the close
+    reason reads why it STOPPED — and with no frames those are the same reading.
+    """
+
+    def test_no_frames_alone_cannot_separate_the_two_candidates(self):
+        """The gap this exists to fill, asserted rather than assumed."""
+        a, b = FrameTrace(enabled=True), FrameTrace(enabled=True)
+        a.close("peer_closed")
+        b.close("loop_ended_no_result")
+        assert a.classify() == b.classify() == "no_frames", (
+            "if these ever classify differently the close reason is redundant — delete it"
+        )
+        assert a.close_reason != b.close_reason, "the close reason does not separate them"
+
+    def test_close_records_a_time_on_the_same_clock_as_frames(self):
+        t = FrameTrace(enabled=True)
+        t.record_parts(STDOUT, 4)
+        t.close("peer_closed")
+        assert t.close_at is not None and t.frames
+        assert t.close_at >= t.frames[-1][2], (
+            "close_at precedes the last frame — the two are not on the same t0"
+        )
+
+    def test_close_is_a_noop_when_disabled(self):
+        t = FrameTrace(enabled=False)
+        t.close("peer_closed")
+        assert t.close_reason is None and t.close_at is None
+
+    def test_render_surfaces_the_close(self):
+        t = FrameTrace(enabled=True)
+        t.close("peer_closed")
+        line = t.render()
+        assert "close=peer_closed@" in line, f"the close reason is not in the trace line: {line}"
+        assert "shape=[]" in line and "classify=no_frames" in line
+
+    def test_render_says_n_a_rather_than_inventing_a_close(self):
+        """⚠ An un-closed trace must not read as a close at t=0."""
+        t = FrameTrace(enabled=True)
+        t.record_parts(RESULT, 15)
+        assert "close=n/a@n/a" in t.render()
+
+
+class TestClassifyEnumerationIsComplete:
+    """Every label `classify()` can return must be produced by a real sequence.
+
+    ★ WHY `len(seen) >= 5` IS NOT THIS TEST. A lower bound says the classifier is not
+    single-valued. It cannot say whether a label exists that NO sequence in the corpus
+    reaches — and an unreached branch is the dangerous one: it will be read for the first
+    time in production, on the run that matters, with no fixture ever having exercised it.
+    `reorder` was exactly that for a while on the consumer side — a branch the real client
+    could not reach, so the classifier had an answer nobody could ever see.
+
+    The declared set is read out of the FUNCTION, not listed here, so a label added
+    without a fixture fails on the day it is added rather than the day it is needed.
+    """
+
+    @staticmethod
+    def _declared() -> set:
+        import ast
+        import inspect
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(FrameTrace.classify)))
+        return {
+            n.value.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Return)
+            and isinstance(n.value, ast.Constant)
+            and isinstance(n.value.value, str)
+        }
+
+    @staticmethod
+    def _corpus() -> dict:
+        def trace(frames, enabled=True):
+            t = FrameTrace(enabled=enabled)
+            for code, length in frames:
+                t.record_parts(code, length)
+            return t
+
+        return {
+            "tracing off": trace([], enabled=False),
+            "nothing arrived": trace([]),
+            "stdout then result": trace([(STDOUT, 12), (RESULT, 15)]),
+            "result then stdout (drain recovery)": trace([(RESULT, 15), (STDOUT, 12)]),
+            "a lone small result": trace([(RESULT, 15)]),
+            "stderr then result": trace([(STDERR, 20), (RESULT, 15)]),
+            "stderr, session ended": trace([(STDERR, 20)]),
+        }
+
+    def test_the_declared_set_was_actually_read(self):
+        """Control. An empty declared set makes the comparison below vacuous."""
+        declared = self._declared()
+        assert len(declared) >= 5, (
+            f"only {declared} read out of classify() — the AST reader is stale"
+        )
+
+    def test_every_label_the_classifier_can_return_has_a_sequence_that_produces_it(self):
+        declared = self._declared()
+        produced = {t.classify() for t in self._corpus().values()}
+
+        unreached = sorted(declared - produced)
+        assert not unreached, (
+            f"classify() can return {unreached}, and no sequence in the corpus produces "
+            "them. An unexercised branch is read for the first time in production, on the "
+            "run that matters. Add a sequence that reaches it, or delete the branch."
+        )
+        invented = sorted(produced - declared)
+        assert not invented, (
+            f"the corpus produced {invented}, which the AST reader did not find among "
+            "classify()'s returns — the reader is missing a return path, so 'unreached' "
+            "above is measured against an incomplete declaration."
+        )
+
+    def test_distinct_sequences_stay_distinct(self):
+        """The corpus is chosen so no two entries may share a label.
+
+        ⚠ Each pair here is a decision someone makes differently: a drop is the provider's
+        problem, a reorder is ours, a lone small result is a dead lease. If two of them
+        ever answer the same, the classifier has stopped being a classifier — and the
+        assertion above would still pass, because every label would still be produced.
+        """
+        labels = {name: t.classify() for name, t in self._corpus().items()}
+        collisions = [
+            (a, b)
+            for i, a in enumerate(labels)
+            for b in list(labels)[i + 1 :]
+            if labels[a] == labels[b]
+        ]
+        assert not collisions, f"these sequences classify identically: {collisions} — {labels}"
+
+
+def test_the_two_declarations_of_the_version_agree():
+    """★ The package states its version TWICE, and a bump touches one of them.
+
+    ⚠ FOUND BY WALKING INTO IT. Bumping `pyproject.toml` for the 0.3.0 release left
+    `__version__` reading "0.2.0" — the wheel would have installed as 0.3.0 while the
+    module it contains introduced itself as 0.2.0.
+
+    That is not cosmetic here. The consumer pins by URL and `#sha256=`, so the wheel is
+    unambiguous, but ANY runtime check — a log line, a compatibility guard, a support
+    question answered from `akash_lease_core.__version__` — reads the copy that did not
+    move. A version that lies is worse than one that is absent: absence prompts a
+    question, a wrong answer ends the enquiry.
+
+    Same shape as the two requirements pins in the consumer repo: one fact, two
+    declarations, each individually valid, and nothing asserting they agree.
+    """
+    import re
+    from pathlib import Path
+
+    import akash_lease_core
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M)
+    assert match, "pyproject.toml no longer declares a version — this test's premise moved"
+
+    assert match.group(1) == akash_lease_core.__version__, (
+        f"pyproject.toml says {match.group(1)} and __version__ says "
+        f"{akash_lease_core.__version__}. A release bumps one of these; nothing but this "
+        "assertion notices when it does not bump the other."
+    )
