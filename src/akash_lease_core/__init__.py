@@ -226,7 +226,7 @@ class FrameTrace:
     frame's two timestamps cannot disagree.
     """
 
-    __slots__ = ("_frames", "_t0", "t_result")
+    __slots__ = ("_frames", "_t0", "t_result", "close_reason", "close_at")
 
     def __init__(self, enabled: bool | None = None) -> None:
         if enabled is None:
@@ -234,6 +234,8 @@ class FrameTrace:
         self._frames: list[tuple[int, int, float]] | None = [] if enabled else None
         self._t0 = time.monotonic()
         self.t_result: float | None = None
+        self.close_reason: str | None = None
+        self.close_at: float | None = None
 
     @property
     def enabled(self) -> bool:
@@ -301,13 +303,38 @@ class FrameTrace:
             return "no_stdout_frame"
         return "no_result_frame"
 
+    def close(self, reason: str) -> None:
+        """Record WHY the receive loop ended, and when.
+
+        ★ THE DISCRIMINATOR ``classify()`` CANNOT PROVIDE. Two very different failures
+        both yield an empty frame list:
+
+          * the peer closed the connection before sending anything
+          * the loop ended without ever receiving a result frame
+
+        Same shape, different layer — and an ``exit=-1`` with no frames is exactly where
+        that distinction decides the diagnosis. The frame sequence answers "what arrived";
+        only the close answers "why it stopped".
+
+        ⚠ ``rel_time`` here is measured from the same ``t0`` as the frames, so the gap
+        between the last frame and the close is readable directly: a close 0.5s into a
+        30s budget with no frames is a connection-layer event, while a close after a long
+        silence is a timeout.
+        """
+        if self._frames is None:
+            return
+        self.close_reason = reason
+        self.close_at = round(time.monotonic() - self._t0, 4)
+
     def render(self, recovered: int = 0) -> str:
         """The one-line summary. Called AFTER the receive loop, never inside it."""
         tr = f"{self.t_result:.3f}s" if self.t_result is not None else "none"
         return (
             f"[lease-shell] FRAME-TRACE shape=[{self.shape()}] "
             f"stdout_bytes={self.stdout_bytes()} recovered={recovered} "
-            f"t_result={tr} classify={self.classify()} frames={self.frames}"
+            f"t_result={tr} classify={self.classify()} "
+            f"close={self.close_reason or 'n/a'}@{self.close_at if self.close_at is not None else 'n/a'} "
+            f"frames={self.frames}"
         )
 
 

@@ -374,3 +374,49 @@ class TestRecordParts:
         t = FrameTrace(enabled=True)
         t.record_parts(RESULT, 15)
         assert t.t_result is not None and t.classify() == "lone_small_result"
+
+
+class TestCloseDiscriminator:
+    """★ ARCHITECT's two candidates for `exit=-1` BOTH produce zero frames.
+
+    An empty-stderr `-1` can arise where the peer closed the connection, or where the
+    loop ended without a result frame. `classify()` reads what ARRIVED; only the close
+    reason reads why it STOPPED — and with no frames those are the same reading.
+    """
+
+    def test_no_frames_alone_cannot_separate_the_two_candidates(self):
+        """The gap this exists to fill, asserted rather than assumed."""
+        a, b = FrameTrace(enabled=True), FrameTrace(enabled=True)
+        a.close("peer_closed")
+        b.close("loop_ended_no_result")
+        assert a.classify() == b.classify() == "no_frames", (
+            "if these ever classify differently the close reason is redundant — delete it"
+        )
+        assert a.close_reason != b.close_reason, "the close reason does not separate them"
+
+    def test_close_records_a_time_on_the_same_clock_as_frames(self):
+        t = FrameTrace(enabled=True)
+        t.record_parts(STDOUT, 4)
+        t.close("peer_closed")
+        assert t.close_at is not None and t.frames
+        assert t.close_at >= t.frames[-1][2], (
+            "close_at precedes the last frame — the two are not on the same t0"
+        )
+
+    def test_close_is_a_noop_when_disabled(self):
+        t = FrameTrace(enabled=False)
+        t.close("peer_closed")
+        assert t.close_reason is None and t.close_at is None
+
+    def test_render_surfaces_the_close(self):
+        t = FrameTrace(enabled=True)
+        t.close("peer_closed")
+        line = t.render()
+        assert "close=peer_closed@" in line, f"the close reason is not in the trace line: {line}"
+        assert "shape=[]" in line and "classify=no_frames" in line
+
+    def test_render_says_n_a_rather_than_inventing_a_close(self):
+        """⚠ An un-closed trace must not read as a close at t=0."""
+        t = FrameTrace(enabled=True)
+        t.record_parts(RESULT, 15)
+        assert "close=n/a@n/a" in t.render()
