@@ -136,6 +136,34 @@ def test_fallback_phase_is_bounded_when_nobody_bids():
     assert auction.evaluate(now=100).status is AuctionStatus.EXPIRED
 
 
+def test_preferred_bid_after_preferred_deadline_cannot_displace_fallback():
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=60,
+            fallback_window_seconds=30,
+            preferred_providers=frozenset({"lisbon"}),
+        ),
+        started_at=0,
+    )
+    auction.observe(bid("hurricane", "9", 61))
+    auction.observe(bid("lisbon", "1", 62))
+    result = auction.evaluate(now=62)
+    assert result.selected is not None
+    assert result.selected.provider == "hurricane"
+    assert result.selection_reason == "first_eligible_fallback"
+
+
+def test_bid_observed_after_fallback_deadline_cannot_revive_expired_auction():
+    auction = Auction(
+        AuctionPolicy(collection_window_seconds=60, fallback_window_seconds=30),
+        started_at=0,
+    )
+    auction.observe(bid("hurricane", "1", 91))
+    result = auction.evaluate(now=91)
+    assert result.status is AuctionStatus.EXPIRED
+    assert result.selected is None
+
+
 def test_explicit_eligible_population_rejects_foreign_bids():
     auction = Auction(
         AuctionPolicy(

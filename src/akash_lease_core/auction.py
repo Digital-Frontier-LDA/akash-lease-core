@@ -170,6 +170,8 @@ class Auction:
                 and observation.provider not in self.policy.eligible_providers
             ):
                 rejected.append(self._reject(observation, "provider_not_eligible"))
+            elif observation.observed_at > min(now, self.fallback_deadline):
+                rejected.append(self._reject(observation, "bid_observed_after_fallback_deadline"))
             else:
                 candidates.append(observation)
 
@@ -195,6 +197,7 @@ class Auction:
             observation
             for observation in candidates
             if observation.provider in self.policy.preferred_providers
+            and observation.observed_at <= self.deadline
         ]
         pool = preferred or candidates
         denominations = sorted({observation.denom for observation in pool})
