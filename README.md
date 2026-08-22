@@ -1,13 +1,13 @@
 # akash-lease-core
 
-Sans-I/O core for Akash **lease acquisition and lease-shell semantics**: a
-deadline-bound provider auction, frame codec, URL builders, and trustworthy exec
-result interpretation.
+Sans-I/O core for Akash **wallet, lease acquisition, and lease-shell semantics**:
+deterministic wallet ranking, a deadline-bound provider auction, frame codec, URL
+builders, and trustworthy exec result interpretation.
 
 No sockets. No event loop. No `ssl`, `websockets`, `requests`, or `httpx`. Stdlib only, **zero runtime dependencies**.
 
 ```bash
-pip install "git+https://github.com/Digital-Frontier-LDA/akash-lease-core@v0.5.0"
+pip install "git+https://github.com/Digital-Frontier-LDA/akash-lease-core@v0.6.0"
 ```
 
 ## Why
@@ -96,6 +96,19 @@ then choose the cheapest open preferred bid; if no preferred provider bid exists
 choose the cheapest open eligible bid. Provider eligibility is policy input—not
 hard-coded in this package. Mixed denominations fail closed because unlike
 currencies cannot be compared safely.
+
+## Console wallet ranking
+
+`rank_wallets` receives non-secret account snapshots and returns a deterministic
+attempt order: unique accounts with enough credit, richest first. Adapters retain
+all secret handling and I/O—including account discovery, authoritative allowance
+reads, DSEQ-owner lookup, and cross-process coordination.
+
+Two keys resolving to one account are one source of sequence and funding capacity,
+not two. The core therefore folds duplicate accounts before ranking. Consumers must
+route later status/update/destroy operations to the account that owns the DSEQ;
+re-running the richest-wallet rule during cleanup is unsafe because balances can
+change after creation.
 
 ## Reconciled semantics
 

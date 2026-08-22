@@ -49,6 +49,14 @@ from .auction import (
     MixedBidDenominations,
     RejectedBid,
 )
+from .wallets import (
+    RejectedWallet,
+    WalletCandidate,
+    WalletPolicy,
+    WalletSelectionResult,
+    WalletSelectionStatus,
+    rank_wallets,
+)
 
 __all__ = [
     "STDOUT",
@@ -76,9 +84,15 @@ __all__ = [
     "BidObservation",
     "MixedBidDenominations",
     "RejectedBid",
+    "RejectedWallet",
+    "WalletCandidate",
+    "WalletPolicy",
+    "WalletSelectionResult",
+    "WalletSelectionStatus",
+    "rank_wallets",
 ]
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
