@@ -1,7 +1,7 @@
 [project]
 name = "akash-lease-core"
-version = "0.4.0"
-description = "Sans-I/O core for the Akash provider lease-shell wire protocol — frame codec, URL builders, and trustworthy exec result semantics."
+version = "0.5.0"
+description = "Sans-I/O core for Akash lease acquisition and lease-shell semantics."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"

@@ -40,6 +40,16 @@ import struct
 import time
 import urllib.parse
 
+from .auction import (
+    Auction,
+    AuctionPolicy,
+    AuctionResult,
+    AuctionStatus,
+    BidObservation,
+    MixedBidDenominations,
+    RejectedBid,
+)
+
 __all__ = [
     "STDOUT",
     "STDERR",
@@ -59,9 +69,16 @@ __all__ = [
     "decode_proxy_payload",
     "is_unverified_success",
     "interpret_success",
+    "Auction",
+    "AuctionPolicy",
+    "AuctionResult",
+    "AuctionStatus",
+    "BidObservation",
+    "MixedBidDenominations",
+    "RejectedBid",
 ]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants

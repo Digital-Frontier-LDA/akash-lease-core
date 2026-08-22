@@ -1,11 +1,13 @@
 # akash-lease-core
 
-Sans-I/O core for the **Akash provider lease-shell** wire protocol: frame codec, URL builders, and — the reason this package exists — **trustworthy exec result semantics**.
+Sans-I/O core for Akash **lease acquisition and lease-shell semantics**: a
+deadline-bound provider auction, frame codec, URL builders, and trustworthy exec
+result interpretation.
 
 No sockets. No event loop. No `ssl`, `websockets`, `requests`, or `httpx`. Stdlib only, **zero runtime dependencies**.
 
 ```bash
-pip install "git+https://github.com/Digital-Frontier-LDA/akash-lease-core@v0.1.0"
+pip install "git+https://github.com/Digital-Frontier-LDA/akash-lease-core@v0.5.0"
 ```
 
 ## Why
@@ -55,6 +57,46 @@ The protocol is a pure function of bytes; **each consumer supplies its own I/O a
 
 Both share the frame codec and result semantics. The divergence is egress strategy, which stays in the adapter.
 
+## Provider auction
+
+`Auction` is a clock-neutral state machine shared by Console, wallet/chain, and
+CLI adapters. Adapters normalize external bids and supply their own monotonic
+clock; the core performs no polling or networking.
+
+```python
+from decimal import Decimal
+
+from akash_lease_core import Auction, AuctionPolicy, BidObservation
+
+auction = Auction(
+    AuctionPolicy(
+        collection_window_seconds=60,
+        preferred_providers=frozenset({"akash1lisbon", "akash1sofia"}),
+        eligible_providers=frozenset({"akash1lisbon", "akash1sofia", "akash1fallback"}),
+    ),
+    started_at=0,
+)
+auction.observe(
+    BidObservation(
+        bid_key="order/provider/gseq/oseq",
+        provider="akash1lisbon",
+        price=Decimal("4.2"),
+        denom="uact",
+        observed_at=58,
+    )
+)
+
+assert auction.evaluate(now=59).status.value == "collecting"
+decision = auction.evaluate(now=60)
+assert decision.selected.provider == "akash1lisbon"
+```
+
+The invariant is: collect for the complete configured window (0–60 seconds),
+then choose the cheapest open preferred bid; if no preferred provider bid exists,
+choose the cheapest open eligible bid. Provider eligibility is policy input—not
+hard-coded in this package. Mixed denominations fail closed because unlike
+currencies cannot be compared safely.
+
 ## Reconciled semantics
 
 This package unifies two prior implementations that had **drifted**. Rather than silently imposing one, both behaviours are explicit:
@@ -70,7 +112,7 @@ Use `strict=False` for a service that must never raise; `strict=True` for a CLI 
 ## Invariants
 
 1. **Zero runtime dependencies.** `dependencies = []` is deliberate; a test asserts the module imports no networking library.
-2. **No I/O.** If you need a socket, you are writing an adapter, not core.
+2. **No I/O.** If you need a socket, a sleep, or a clock read, you are writing an adapter, not core.
 3. **Python >= 3.10**, so both consumers can adopt it.
 
 ## License
