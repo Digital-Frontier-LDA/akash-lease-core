@@ -8,7 +8,7 @@ The contract is intentionally small:
 
 * collect for the complete configured window (0--60 seconds),
 * then choose the cheapest open preferred bid when one exists,
-* otherwise choose the cheapest open eligible bid,
+* otherwise choose the first observed open eligible fallback bid,
 * never compare prices expressed in different denominations.
 """
 
@@ -63,16 +63,21 @@ class AuctionPolicy:
     """A snapshotted provider policy for one auction."""
 
     collection_window_seconds: float = 60
+    fallback_window_seconds: float = 60
     preferred_providers: frozenset[str] = field(default_factory=frozenset)
     eligible_providers: frozenset[str] | None = None
     excluded_providers: frozenset[str] = field(default_factory=frozenset)
-    version: str = "provider-auction/v1"
+    version: str = "provider-auction/v2"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.collection_window_seconds):
             raise ValueError("collection_window_seconds must be finite")
         if not 0 <= self.collection_window_seconds <= 60:
             raise ValueError("collection_window_seconds must be between 0 and 60 inclusive")
+        if not math.isfinite(self.fallback_window_seconds):
+            raise ValueError("fallback_window_seconds must be finite")
+        if not 0 <= self.fallback_window_seconds <= 120:
+            raise ValueError("fallback_window_seconds must be between 0 and 120 inclusive")
         object.__setattr__(self, "preferred_providers", frozenset(self.preferred_providers))
         if self.eligible_providers is not None:
             object.__setattr__(self, "eligible_providers", frozenset(self.eligible_providers))
@@ -98,6 +103,7 @@ class AuctionResult:
     policy_version: str
     started_at: float
     deadline: float
+    fallback_deadline: float
     evaluated_at: float
     selected: BidObservation | None
     selection_reason: str
@@ -114,6 +120,7 @@ class Auction:
         self.policy = policy
         self.started_at = started_at
         self.deadline = started_at + policy.collection_window_seconds
+        self.fallback_deadline = self.deadline + policy.fallback_window_seconds
         self._latest_by_key: dict[str, BidObservation] = {}
 
     def observe(self, observation: BidObservation) -> None:
@@ -163,8 +170,19 @@ class Auction:
                 and observation.provider not in self.policy.eligible_providers
             ):
                 rejected.append(self._reject(observation, "provider_not_eligible"))
+            elif observation.observed_at > min(now, self.fallback_deadline):
+                rejected.append(self._reject(observation, "bid_observed_after_fallback_deadline"))
             else:
                 candidates.append(observation)
+
+        if not candidates and now < self.fallback_deadline:
+            return self._result(
+                status=AuctionStatus.COLLECTING,
+                now=now,
+                selected=None,
+                reason="waiting_for_first_eligible_fallback",
+                rejected=tuple(rejected),
+            )
 
         if not candidates:
             return self._result(
@@ -179,6 +197,7 @@ class Auction:
             observation
             for observation in candidates
             if observation.provider in self.policy.preferred_providers
+            and observation.observed_at <= self.deadline
         ]
         pool = preferred or candidates
         denominations = sorted({observation.denom for observation in pool})
@@ -188,16 +207,24 @@ class Auction:
                 + ", ".join(denominations)
             )
 
-        selected = min(pool, key=lambda item: (item.price, item.provider, item.bid_key))
-        reason = "cheapest_preferred" if preferred else "cheapest_eligible_fallback"
+        if preferred:
+            selected = min(pool, key=lambda item: (item.price, item.provider, item.bid_key))
+            reason = "cheapest_preferred"
+            considered = tuple(
+                sorted(pool, key=lambda item: (item.price, item.provider, item.bid_key))
+            )
+        else:
+            selected = min(pool, key=lambda item: (item.observed_at, item.provider, item.bid_key))
+            reason = "first_eligible_fallback"
+            considered = tuple(
+                sorted(pool, key=lambda item: (item.observed_at, item.provider, item.bid_key))
+            )
         return self._result(
             status=AuctionStatus.DECIDED,
             now=now,
             selected=selected,
             reason=reason,
-            considered=tuple(
-                sorted(pool, key=lambda item: (item.price, item.provider, item.bid_key))
-            ),
+            considered=considered,
             rejected=tuple(rejected),
         )
 
@@ -224,6 +251,7 @@ class Auction:
             policy_version=self.policy.version,
             started_at=self.started_at,
             deadline=self.deadline,
+            fallback_deadline=self.fallback_deadline,
             evaluated_at=now,
             selected=selected,
             selection_reason=reason,

@@ -72,7 +72,7 @@ def test_at_deadline_selects_cheapest_preferred_not_first_preferred():
     assert result.selection_reason == "cheapest_preferred"
 
 
-def test_without_preferred_bid_selects_cheapest_eligible_fallback():
+def test_without_preferred_bid_selects_first_observed_eligible_fallback():
     auction = Auction(
         AuctionPolicy(
             collection_window_seconds=30,
@@ -87,8 +87,8 @@ def test_without_preferred_bid_selects_cheapest_eligible_fallback():
     result = auction.evaluate(now=40)
 
     assert result.selected is not None
-    assert result.selected.provider == "hurricane"
-    assert result.selection_reason == "cheapest_eligible_fallback"
+    assert result.selected.provider == "helsinki"
+    assert result.selection_reason == "first_eligible_fallback"
 
 
 def test_none_eligible_population_means_any_provider_may_fallback():
@@ -99,10 +99,69 @@ def test_none_eligible_population_means_any_provider_may_fallback():
     auction.observe(bid("unknown-a", "8", 1))
     auction.observe(bid("unknown-b", "2", 2))
 
-    result = auction.evaluate(now=10)
+    result = auction.evaluate(now=70)
 
     assert result.selected is not None
-    assert result.selected.provider == "unknown-b"
+    assert result.selected.provider == "unknown-a"
+
+
+def test_after_preferred_window_waits_for_first_eligible_fallback():
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=60,
+            fallback_window_seconds=30,
+            preferred_providers=frozenset({"lisbon", "sofia", "helsinki"}),
+            eligible_providers=frozenset({"lisbon", "sofia", "helsinki", "hurricane"}),
+        ),
+        started_at=0,
+    )
+
+    waiting = auction.evaluate(now=60)
+    assert waiting.status is AuctionStatus.COLLECTING
+    assert waiting.selection_reason == "waiting_for_first_eligible_fallback"
+
+    auction.observe(bid("hurricane", "99", 63))
+    decided = auction.evaluate(now=63)
+    assert decided.status is AuctionStatus.DECIDED
+    assert decided.selected is not None
+    assert decided.selected.provider == "hurricane"
+
+
+def test_fallback_phase_is_bounded_when_nobody_bids():
+    auction = Auction(
+        AuctionPolicy(collection_window_seconds=60, fallback_window_seconds=30),
+        started_at=10,
+    )
+    assert auction.evaluate(now=99.9).status is AuctionStatus.COLLECTING
+    assert auction.evaluate(now=100).status is AuctionStatus.EXPIRED
+
+
+def test_preferred_bid_after_preferred_deadline_cannot_displace_fallback():
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=60,
+            fallback_window_seconds=30,
+            preferred_providers=frozenset({"lisbon"}),
+        ),
+        started_at=0,
+    )
+    auction.observe(bid("hurricane", "9", 61))
+    auction.observe(bid("lisbon", "1", 62))
+    result = auction.evaluate(now=62)
+    assert result.selected is not None
+    assert result.selected.provider == "hurricane"
+    assert result.selection_reason == "first_eligible_fallback"
+
+
+def test_bid_observed_after_fallback_deadline_cannot_revive_expired_auction():
+    auction = Auction(
+        AuctionPolicy(collection_window_seconds=60, fallback_window_seconds=30),
+        started_at=0,
+    )
+    auction.observe(bid("hurricane", "1", 91))
+    result = auction.evaluate(now=91)
+    assert result.status is AuctionStatus.EXPIRED
+    assert result.selected is None
 
 
 def test_explicit_eligible_population_rejects_foreign_bids():
@@ -166,7 +225,7 @@ def test_latest_state_for_a_bid_key_prevents_selecting_a_closed_bid():
     )
 
 
-def test_equal_prices_have_a_stable_provider_then_bid_key_tiebreak():
+def test_fallback_selection_is_stable_by_observation_then_provider_bid_key():
     policy = AuctionPolicy(collection_window_seconds=10)
     first = Auction(policy, started_at=0)
     second = Auction(policy, started_at=0)
@@ -177,7 +236,7 @@ def test_equal_prices_have_a_stable_provider_then_bid_key_tiebreak():
         second.observe(observation)
 
     assert first.evaluate(now=10).selected == second.evaluate(now=10).selected
-    assert first.evaluate(now=10).selected.provider == "a-provider"
+    assert first.evaluate(now=10).selected.provider == "z-provider"
 
 
 def test_mixed_denominations_fail_closed_instead_of_comparing_unlike_prices():
@@ -216,7 +275,7 @@ def test_no_eligible_open_bid_expires_with_rejection_evidence():
     )
     auction.observe(bid("foreign", "1", 1))
 
-    result = auction.evaluate(now=10)
+    result = auction.evaluate(now=70)
 
     assert result.status is AuctionStatus.EXPIRED
     assert result.selected is None

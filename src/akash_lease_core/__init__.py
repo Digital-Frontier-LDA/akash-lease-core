@@ -92,7 +92,7 @@ __all__ = [
     "rank_wallets",
 ]
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
