@@ -7,7 +7,7 @@ builders, and trustworthy exec result interpretation.
 No sockets. No event loop. No `ssl`, `websockets`, `requests`, or `httpx`. Stdlib only, **zero runtime dependencies**.
 
 ```bash
-pip install "git+https://github.com/Digital-Frontier-LDA/akash-lease-core@v0.6.0"
+pip install "git+https://github.com/Digital-Frontier-LDA/akash-lease-core@v0.7.0"
 ```
 
 ## Why
@@ -92,10 +92,11 @@ assert decision.selected.provider == "akash1lisbon"
 ```
 
 The invariant is: collect for the complete configured window (0–60 seconds),
-then choose the cheapest open preferred bid; if no preferred provider bid exists,
-choose the cheapest open eligible bid. Provider eligibility is policy input—not
-hard-coded in this package. Mixed denominations fail closed because unlike
-currencies cannot be compared safely.
+then choose the cheapest open preferred bid. If none exists, enter a bounded
+fallback phase and select the first observed open eligible bid; a fallback that
+already bid can be selected immediately at the phase transition. Provider
+eligibility is policy input—not hard-coded in this package. Mixed denominations
+fail closed because unlike currencies cannot be compared safely.
 
 ## Console wallet ranking
 
