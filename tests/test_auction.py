@@ -51,6 +51,72 @@ def test_collects_for_the_entire_window_even_when_a_preferred_bid_arrives_early(
     assert result.selected is None
 
 
+def test_late_arriving_preferred_beats_early_backup_inside_grace_window():
+    """60s grace contract.
+
+    A backup bid observed early in the window MUST NOT win against a preferred bid
+    observed later but still inside the 60-second collection window. The library
+    enforces equal-opportunity by accumulating observations and choosing at the
+    deadline; an adapter that returns on the first non-empty poll would instead
+    pick the backup. This test pins down the contract any adapter must honor.
+
+    See C5 structural review, Deep dive 5 ("provider selection and qualification
+    control planes"), and the akash-lease-core C5 tracking issue.
+    """
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=60,
+            preferred_providers=frozenset({"lisbon"}),
+            eligible_providers=frozenset({"lisbon", "hurricane"}),
+        ),
+        started_at=0,
+    )
+
+    # Backup bid arrives at t=3 (well inside the window).
+    auction.observe(bid("hurricane", "1", 3))
+    # While still collecting, an evaluate() call sees the backup but stays COLLECTING.
+    mid_window = auction.evaluate(now=10)
+    assert mid_window.status is AuctionStatus.COLLECTING
+    assert mid_window.selected is None
+    assert mid_window.selection_reason == "collection_window_open"
+
+    # Preferred bid arrives late in the window at t=9 (still inside the 60s grace).
+    auction.observe(bid("lisbon", "5", 9))
+
+    # At the deadline the cheapest preferred (lisbon) wins, not the cheaper backup.
+    decided = auction.evaluate(now=60)
+    assert decided.status is AuctionStatus.DECIDED
+    assert decided.selected is not None
+    assert decided.selected.provider == "lisbon"
+    assert decided.selection_reason == "cheapest_preferred"
+
+
+def test_preferred_observed_one_second_before_deadline_still_beats_early_backup():
+    """Boundary case: a preferred bid arriving one tick before the deadline wins.
+
+    Reinforces the equal-opportunity contract: the deadline is the exclusive moment
+    of choice, not a soft early-exit. A consumer that times out slightly before 60s
+    would lose this preferred bid; this test makes that misimplementation visible.
+    """
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=60,
+            preferred_providers=frozenset({"lisbon"}),
+            eligible_providers=frozenset({"lisbon", "hurricane"}),
+        ),
+        started_at=0,
+    )
+    auction.observe(bid("hurricane", "1", 1))
+    auction.observe(bid("lisbon", "9", 59.999))
+
+    result = auction.evaluate(now=60)
+
+    assert result.status is AuctionStatus.DECIDED
+    assert result.selected is not None
+    assert result.selected.provider == "lisbon"
+    assert result.selection_reason == "cheapest_preferred"
+
+
 def test_at_deadline_selects_cheapest_preferred_not_first_preferred():
     auction = Auction(
         AuctionPolicy(
