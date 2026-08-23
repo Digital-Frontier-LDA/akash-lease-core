@@ -42,6 +42,7 @@ class BidObservation:
     denom: str
     observed_at: float
     state: str = "open"
+    proofs: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.bid_key:
@@ -56,6 +57,7 @@ class BidObservation:
         object.__setattr__(self, "price", price)
         if not math.isfinite(self.observed_at):
             raise ValueError("observed_at must be finite")
+        object.__setattr__(self, "proofs", tuple(self.proofs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +69,7 @@ class AuctionPolicy:
     preferred_providers: frozenset[str] = field(default_factory=frozenset)
     eligible_providers: frozenset[str] | None = None
     excluded_providers: frozenset[str] = field(default_factory=frozenset)
+    required_proofs: frozenset[str] = field(default_factory=frozenset)
     version: str = "provider-auction/v2"
 
     def __post_init__(self) -> None:
@@ -82,6 +85,7 @@ class AuctionPolicy:
         if self.eligible_providers is not None:
             object.__setattr__(self, "eligible_providers", frozenset(self.eligible_providers))
         object.__setattr__(self, "excluded_providers", frozenset(self.excluded_providers))
+        object.__setattr__(self, "required_proofs", frozenset(self.required_proofs))
         if not self.version:
             raise ValueError("version must not be empty")
 
@@ -109,6 +113,7 @@ class AuctionResult:
     selection_reason: str
     considered: tuple[BidObservation, ...] = ()
     rejected: tuple[RejectedBid, ...] = ()
+    missing_required_proofs: tuple[str, ...] = ()
 
 
 class Auction:
@@ -219,6 +224,7 @@ class Auction:
             considered = tuple(
                 sorted(pool, key=lambda item: (item.observed_at, item.provider, item.bid_key))
             )
+        missing = tuple(sorted(set(self.policy.required_proofs) - set(selected.proofs)))
         return self._result(
             status=AuctionStatus.DECIDED,
             now=now,
@@ -226,6 +232,7 @@ class Auction:
             reason=reason,
             considered=considered,
             rejected=tuple(rejected),
+            missing_required_proofs=missing,
         )
 
     @staticmethod
@@ -245,6 +252,7 @@ class Auction:
         reason: str,
         considered: tuple[BidObservation, ...] = (),
         rejected: tuple[RejectedBid, ...] = (),
+        missing_required_proofs: tuple[str, ...] = (),
     ) -> AuctionResult:
         return AuctionResult(
             status=status,
@@ -257,4 +265,5 @@ class Auction:
             selection_reason=reason,
             considered=considered,
             rejected=rejected,
+            missing_required_proofs=missing_required_proofs,
         )

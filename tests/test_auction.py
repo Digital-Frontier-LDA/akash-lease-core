@@ -347,3 +347,173 @@ def test_no_eligible_open_bid_expires_with_rejection_evidence():
     assert result.selected is None
     assert result.selection_reason == "no_eligible_open_bids"
     assert len(result.rejected) == 1
+
+
+# ---------------------------------------------------------------------------
+# Typed-evidence machinery (C5 #13 item 3)
+# ---------------------------------------------------------------------------
+#
+# The library exposes a typed-evidence concept so consumers can declare which
+# proof IDs a bid must carry before they will accept the decision. The library
+# does NOT reject bids for missing proofs — it surfaces the gap on the result
+# and lets the consumer decide. This keeps selection logic uniform (item 1)
+# while letting consumers like the tier-roster's `requires_proofs` machinery
+# gate on evidence.
+
+
+def _bid_with_proofs(
+    provider: str,
+    price: str,
+    observed_at: float,
+    proofs: tuple[str, ...],
+    *,
+    bid_key: str | None = None,
+) -> BidObservation:
+    return BidObservation(
+        bid_key=bid_key or provider,
+        provider=provider,
+        price=Decimal(price),
+        denom="uact",
+        observed_at=observed_at,
+        proofs=proofs,
+    )
+
+
+def test_no_required_proofs_means_no_missing_proofs_reported():
+    """Default ``required_proofs`` is empty -> every decision is complete.
+
+    Consumers that do not declare evidence requirements see the same
+    selection behavior as before this field existed; the regression-guard
+    is the equality check.
+    """
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=10,
+            preferred_providers=frozenset({"lisbon"}),
+        ),
+        started_at=0,
+    )
+    auction.observe(bid("lisbon", "1", 1))
+
+    result = auction.evaluate(now=10)
+
+    assert result.selected is not None
+    assert result.selected.provider == "lisbon"
+    assert result.missing_required_proofs == ()
+
+
+def test_selected_winner_surfaces_proofs_required_by_policy_but_not_carried():
+    """A bid without required proofs still wins selection; the gap is surfaced.
+
+    Selection is by price/order (uniform contract). The consumer decides
+    whether to accept a decision whose selected winner lacks a required
+    proof — typical patterns are: re-evaluate with stricter acceptance,
+    retry, or block.
+    """
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=10,
+            preferred_providers=frozenset({"lisbon"}),
+            required_proofs=frozenset({"restart_observed", "provider_quote_hash"}),
+        ),
+        started_at=0,
+    )
+    auction.observe(_bid_with_proofs("lisbon", "1", 1, proofs=("restart_observed",)))
+
+    result = auction.evaluate(now=10)
+
+    assert result.selected is not None
+    assert result.selected.provider == "lisbon"
+    assert result.missing_required_proofs == ("provider_quote_hash",)
+
+
+def test_selected_winner_with_all_required_proofs_reports_no_gaps():
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=10,
+            preferred_providers=frozenset({"lisbon"}),
+            required_proofs=frozenset({"restart_observed", "provider_quote_hash"}),
+        ),
+        started_at=0,
+    )
+    auction.observe(
+        _bid_with_proofs(
+            "lisbon",
+            "1",
+            1,
+            proofs=("restart_observed", "provider_quote_hash"),
+        )
+    )
+
+    result = auction.evaluate(now=10)
+
+    assert result.selected is not None
+    assert result.missing_required_proofs == ()
+
+
+def test_required_proofs_do_not_reject_bid_from_selection():
+    """Selection logic stays uniform: only price/order and policy membership filter.
+
+    A bid missing proofs is still considered for selection; the missing
+    proofs are surfaced on the result, not used to silently filter the
+    candidate pool. This keeps item 1 (uniformity) honest while exposing
+    item 3 (typed-evidence) information.
+    """
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=10,
+            preferred_providers=frozenset({"lisbon"}),
+            required_proofs=frozenset({"provider_quote_hash"}),
+        ),
+        started_at=0,
+    )
+    # lisbon is preferred but has no proofs; helsinki is fallback and has proofs.
+    auction.observe(_bid_with_proofs("lisbon", "1", 1, proofs=()))
+    auction.observe(_bid_with_proofs("helsinki", "9", 2, proofs=("provider_quote_hash",)))
+
+    result = auction.evaluate(now=10)
+
+    # Cheapest preferred still wins even with missing proofs — selection is uniform.
+    assert result.selected is not None
+    assert result.selected.provider == "lisbon"
+    # Consumer learns the gap on the result, not via selection rejection.
+    assert result.missing_required_proofs == ("provider_quote_hash",)
+
+
+def test_missing_proofs_are_reported_sorted_for_deterministic_consumer_comparison():
+    """Stable order so consumers can hash the result for caching/audit."""
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=10,
+            preferred_providers=frozenset({"lisbon"}),
+            required_proofs=frozenset({"a", "b", "c"}),
+        ),
+        started_at=0,
+    )
+    # lisbon carries "c" only -> the missing proofs are "a" and "b", reported sorted.
+    auction.observe(_bid_with_proofs("lisbon", "1", 1, proofs=("c",)))
+
+    result = auction.evaluate(now=10)
+
+    assert result.missing_required_proofs == ("a", "b")
+
+
+def test_fallback_path_also_reports_missing_proofs_on_selected_winner():
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=10,
+            fallback_window_seconds=5,
+            preferred_providers=frozenset({"lisbon"}),
+            eligible_providers=frozenset({"lisbon", "hurricane"}),
+            required_proofs=frozenset({"lease_liveness_proof"}),
+        ),
+        started_at=0,
+    )
+    # No lisbon bid; hurricane is fallback and carries no proof.
+    auction.observe(_bid_with_proofs("hurricane", "5", 12, proofs=()))
+
+    result = auction.evaluate(now=13)
+
+    assert result.selected is not None
+    assert result.selected.provider == "hurricane"
+    assert result.missing_required_proofs == ("lease_liveness_proof",)
