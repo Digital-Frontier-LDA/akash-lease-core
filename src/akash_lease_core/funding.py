@@ -184,13 +184,25 @@ def evaluate_funding(
     # Latest READABLE observation per slot. Not the max over time: a stale high
     # reading is not evidence about now. Not a projection: the current level
     # already reflects every step that has happened.
-    latest: dict[str, AllowanceSample] = {}
+    # ⛔ Track the newest sample per slot REGARDLESS of readability, then drop the
+    # slots whose newest observation is unreadable. Skipping unreadable samples
+    # while building this map would let an OLDER readable reading survive a NEWER
+    # unreadable one, and the slot would then answer ABOVE_FLOOR from a level
+    # nobody can currently confirm — a false PASS at an account that may be
+    # starved. "We could not ask" must never be answered with a stale yes.
+    newest: dict[str, AllowanceSample] = {}
     for s in gating:
-        if s.amount_uact is None:
-            continue
-        prev = latest.get(s.slot)
+        prev = newest.get(s.slot)
         if prev is None or s.observed_at >= prev.observed_at:
-            latest[s.slot] = s
+            newest[s.slot] = s
+
+    # A slot is usable only if its NEWEST observation is readable. Other slots
+    # remain eligible, so max(SLOT) is preserved: one unreadable slot does not
+    # veto a different slot that is currently readable and funded.
+    latest: dict[str, AllowanceSample] = {
+        slot: s for slot, s in newest.items() if s.amount_uact is not None
+    }
+    stale_slots = sorted(set(newest) - set(latest))
 
     if not latest:
         return FundingDecision(
@@ -198,8 +210,10 @@ def evaluate_funding(
             None,
             AllowanceQuantity.ONCHAIN_SPEND_LIMITS,
             None,
-            f"all {len(gating)} on-chain sample(s) were UNREADABLE — cannot determine "
-            f"funding. This is not zero.",
+            f"no slot has a readable NEWEST on-chain sample "
+            f"({len(gating)} sample(s); slots whose latest reading was unreadable: "
+            f"{stale_slots or 'none'}) — cannot determine funding. This is not zero, "
+            f"and an older readable reading is not evidence about now.",
             policy.version,
         )
 

@@ -172,9 +172,50 @@ def test_latest_readable_sample_wins_not_the_stale_high_one():
     assert evaluate_funding(s).status is FundingStatus.BELOW_FLOOR
 
 
-def test_a_mix_of_readable_and_unreadable_uses_the_readable_one():
+def test_a_newer_unreadable_sample_does_not_leave_a_stale_pass():
+    """KP, load-bearing. The NEWEST observation for the slot is unreadable.
+
+    The older readable reading was above the floor, but it is not evidence about
+    now. Answering ABOVE_FLOOR here would be a false PASS at an account that may
+    since have been drained — the one direction that costs money. "We could not
+    ask" must resolve to UNDETERMINED, never to a stale yes.
+
+    ⚠ This test previously asserted ABOVE_FLOOR and was GREEN. It was pinning the
+    defect, not the contract.
+    """
     s = [
         AllowanceSample("s", ONCHAIN, None, 30.0),
+        AllowanceSample("s", ONCHAIN, 11_290_000, 20.0),
+    ]
+    d = evaluate_funding(s)
+    assert d.status is FundingStatus.UNDETERMINED, (
+        "a newer UNREADABLE sample must not be overridden by an older readable one"
+    )
+    assert d.allows_create is False
+
+
+def test_an_unreadable_slot_does_not_veto_a_different_readable_slot():
+    """KN, load-bearing. One slot unreadable must NOT collapse the whole decision.
+
+    The gate reads max(SLOT). Slot "dark" cannot be read at all; slot "funded" is
+    currently readable and above the floor. A create is legitimately fundable on
+    "funded". Without this, the fix above would over-correct into refusing every
+    evaluation in which any single slot happens to be unreadable.
+    """
+    s = [
+        AllowanceSample("dark", ONCHAIN, 11_290_000, 10.0),
+        AllowanceSample("dark", ONCHAIN, None, 30.0),
+        AllowanceSample("funded", ONCHAIN, 11_290_000, 29.0),
+    ]
+    d = evaluate_funding(s)
+    assert d.status is FundingStatus.ABOVE_FLOOR
+    assert d.slot == "funded"
+
+
+def test_an_older_unreadable_sample_is_ignored_when_the_newest_is_readable():
+    """KN. Unreadability only matters if it is the LATEST word on that slot."""
+    s = [
+        AllowanceSample("s", ONCHAIN, None, 10.0),
         AllowanceSample("s", ONCHAIN, 11_290_000, 20.0),
     ]
     assert evaluate_funding(s).status is FundingStatus.ABOVE_FLOOR
