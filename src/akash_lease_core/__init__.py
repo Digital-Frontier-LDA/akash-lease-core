@@ -95,6 +95,16 @@ from .auction import (
     MixedBidDenominations,
     RejectedBid,
 )
+from .funding import (
+    DEPOSIT_UACT,
+    AllowanceQuantity,
+    AllowanceSample,
+    FundingDecision,
+    FundingPolicy,
+    FundingStatus,
+    evaluate_funding,
+    step_deltas,
+)
 from .wallets import (
     RejectedWallet,
     WalletCandidate,
@@ -136,10 +146,18 @@ __all__ = [
     "WalletPolicy",
     "WalletSelectionResult",
     "WalletSelectionStatus",
+    "DEPOSIT_UACT",
+    "AllowanceQuantity",
+    "AllowanceSample",
+    "FundingDecision",
+    "FundingPolicy",
+    "FundingStatus",
+    "evaluate_funding",
+    "step_deltas",
     "rank_wallets",
 ]
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
