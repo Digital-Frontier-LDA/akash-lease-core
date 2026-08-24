@@ -28,6 +28,52 @@ lease-shell exec. It occurs with empty stdout in at least two real cases:
 
 Callers that need a trustworthy verdict must supply a ``marker`` (require the
 echoed token in stdout) or set ``require_stdout``.
+
+Read-function sentinel contract (candidate D, #17)
+--------------------------------------------------
+This rule binds the I/O ADAPTER boundary — the function the consumer supplies
+that wraps this package and makes the actual instrument call. The package
+itself is sans-I/O by charter (README "Invariants"), so its public functions
+fall into two groups with different contracts:
+
+**Group 1 — pure parsers (this package, NOT bound by the sentinel rule):**
+
+A pure parser never asks anything. It has no instrument-failure mode to
+distinguish from "asked, got nothing". Malformed input is malformed input —
+there is only one kind of failure, and the parser returns ``None`` for it.
+This package's public parsers return TYPE-APPROPRIATE empties (``b""``,
+``()``, ``""``, ``0``) for a successful empty answer, and ``None`` for any
+malformed input. Examples:
+
+* ``decode_frame`` parses a frame or returns ``None`` — there is no
+  "empty frame" distinct from "malformed frame". Both call sites in
+  ``provider_shell_client`` rely on this.
+* ``decode_proxy_payload`` decodes base64 or returns ``None``; a successful
+  empty payload is ``b""``, not a sentinel. There is no third value.
+
+Returning a sentinel from a pure parser is a category error: it would crash
+every caller that already gated on the type-appropriate empty.
+
+**Group 2 — adapter read functions (the consumer's code, BOUND by the
+sentinel rule):**
+
+An adapter that calls into an I/O instrument — websocket, HTTP, gRPC,
+anything with a real transport — must distinguish **three** outcomes:
+
+    (a) instrument failure    — could not ask         (the value ``None``)
+    (b) asked, no answer      — successful empty read (the value ``EMPTY_ATTRIBUTES``)
+    (c) asked, full answer    — a real, non-empty value
+
+Only outcome (a) may block a destructive action downstream, and the adapter
+must be the one that checks for it, not the caller. Conflating (a) and (b) —
+returning the same value for "the instrument could not ask" and "the
+instrument read nothing" — silently disarms the destructive-action gate;
+measured instance in a consumer: a sweeper that closed a 200 GiB volume
+three times because its liveness read returned the same value on a 404 as
+on a transport failure. See ``tests/test_discipline.py``.
+
+The sentinel is exported (:data:`EMPTY_ATTRIBUTES`) for adapter authors who
+want the three-way discipline without inventing their own value.
 """
 
 from __future__ import annotations
@@ -66,6 +112,7 @@ __all__ = [
     "STDIN",
     "RESIZE",
     "MAX_URL_CMD_BYTES",
+    "EMPTY_ATTRIBUTES",
     "MalformedResultFrame",
     "decode_frame",
     "parse_result_exit_code",
@@ -109,6 +156,13 @@ RESIZE = 105
 # length limits (~8 KB).
 MAX_URL_CMD_BYTES = 4096
 
+# Sentinel for the (b) "asked, no answer" outcome of every public read function.
+# A destructive-action gate that compares against ``None`` MUST block; a value
+# equal to ``EMPTY_ATTRIBUTES`` MUST NOT be conflated with ``None``. See the
+# module-level "Read-function sentinel contract" docstring above. Frozen so
+# identity equality is reliable across calls.
+EMPTY_ATTRIBUTES: frozenset = frozenset()
+
 
 class MalformedResultFrame(ValueError):
     """A RESULT(102) payload could not be parsed into an exit code."""
@@ -128,6 +182,18 @@ def decode_frame(msg: object) -> tuple[int, bytes] | None:
 
     Returns ``None`` for anything that is not a valid frame (non-bytes, or an
     empty message), so callers can simply skip it.
+
+    ⛔ CANDIDATE (D) WAS DELIBERATELY EXCLUDED HERE. ``decode_frame`` is a pure
+    parser — it asks nothing, never reads from an instrument, and has no
+    "asked, no answer" axis to distinguish. Its only live consumer is
+    ``provider_shell_client`` (Blazing-Back), whose TWO call sites guard on
+    ``if frame is None: continue`` and then unpack to ``(code, payload)``.
+    Routing a successful ``b""`` websocket message to a fresh sentinel would
+    fall past that guard and raise ``ValueError: not enough values to unpack``
+    in the streaming loop — a runtime crash in production. The package charter
+    is sans-I/O: pure parsers cannot implement the (a)/(b)/(c) split, only I/O
+    ADAPTERS can. The contract candidate (D) belongs at the adapter boundary;
+    see ``tests/test_discipline.py`` for the rule that does apply here.
     """
     if not isinstance(msg, (bytes, bytearray)) or len(msg) < 1:
         return None
