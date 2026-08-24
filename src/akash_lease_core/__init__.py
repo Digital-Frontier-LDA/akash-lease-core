@@ -148,28 +148,26 @@ _JSON_PARSE_FAILED = object()
 # ---------------------------------------------------------------------------
 # Frame codec
 # ---------------------------------------------------------------------------
-def decode_frame(msg: object) -> tuple[int, bytes] | None | frozenset:
+def decode_frame(msg: object) -> tuple[int, bytes] | None:
     """Split a raw binary frame into ``(code, payload)``.
 
-    Three-way outcome per the module-level sentinel contract:
+    Returns ``None`` for anything that is not a valid frame (non-bytes, or an
+    empty message), so callers can simply skip it.
 
-    * ``None`` — instrument failure (could not ask): ``msg`` is not bytes at all
-      (e.g. ``str``, ``None``, an integer). The caller must treat this as
-      "blocking any downstream destructive action".
-    * :data:`EMPTY_ATTRIBUTES` — asked, no answer: ``msg`` is exactly ``b""``,
-      a successful zero-byte read. The caller MUST NOT treat this as a failure;
-      routing it to the (a) branch is the defect candidate D documents.
-    * ``(code, payload)`` — a real frame. A frame with a code byte and an empty
-      payload (e.g. ``b"\\x00"``) is valid and returns ``(0, b"")``.
-
-    A destructive action that previously gated on ``if result is None`` is wrong
-    on (b); the test ``test_decode_frame_distinguishes_empty_from_failure``
-    pins this and is the canary.
+    ⛔ CANDIDATE (D) WAS DELIBERATELY EXCLUDED HERE. ``decode_frame`` is a pure
+    parser — it asks nothing, never reads from an instrument, and has no
+    "asked, no answer" axis to distinguish. Its only live consumer is
+    ``provider_shell_client`` (Blazing-Back), whose TWO call sites guard on
+    ``if frame is None: continue`` and then unpack to ``(code, payload)``.
+    Routing a successful ``b""`` websocket message to a fresh sentinel would
+    fall past that guard and raise ``ValueError: not enough values to unpack``
+    in the streaming loop — a runtime crash in production. The package charter
+    is sans-I/O: pure parsers cannot implement the (a)/(b)/(c) split, only I/O
+    ADAPTERS can. The contract candidate (D) belongs at the adapter boundary;
+    see ``tests/test_discipline.py`` for the rule that does apply here.
     """
-    if not isinstance(msg, (bytes, bytearray)):
+    if not isinstance(msg, (bytes, bytearray)) or len(msg) < 1:
         return None
-    if len(msg) < 1:
-        return EMPTY_ATTRIBUTES
     return msg[0], bytes(msg[1:])
 
 

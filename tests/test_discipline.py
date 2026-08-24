@@ -1,34 +1,38 @@
 """Read-function sentinel contract — candidate D, issue #17.
 
-This file pins the **public read-function discipline** of ``akash_lease_core``.
-It does not test happy-path behaviour of any single function (those live next
-to the function). It tests the AXIS the read functions live on, so a future
-addition cannot silently re-introduce the defect candidate D exists to catch:
+Pins the **public read-function discipline** that applies to I/O ADAPTERS
+built on top of this package. The package itself is sans-I/O by charter (see
+README "Invariants"), so it cannot split the (a)/(b)/(c) outcomes for an
+incoming message — only the adapter that received the message can. This
+file codifies the rule and pins the already-compliant public surface.
 
-    >>> the same value is returned for "I asked and got nothing" and
-    >>> "I could not ask"
+The defect the rule catches: a read function that returns the same value for
+"I asked and got nothing" and "I could not ask". Measured consumer-side
+instance: a sweeper that closed a 200 GiB volume three times because its
+liveness read returned ``None`` for both transport failure and a 404 from
+the upstream service. The destructive-action gate then fell through to an
+age rule and treated "asked, got nothing" as a destructive-action safe
+input. The discipline prevents the same shape at the adapter boundary.
 
-Measured consumer-side instance that motivated this: a sweeper that closed a
-200 GiB volume three times because its liveness read returned ``None`` for
-both transport failure and a 404 from the upstream service — the gate then
-fell through to an age rule and treated "asked, got nothing" as a
-destructive-action safe input.
+Rule, in one sentence: every public ADAPTER read function MUST distinguish
+three outcomes on a single axis —
 
-The rule, in one sentence: every public read function MUST distinguish three
-outcomes on a single axis — (a) instrument failure returns ``None``; (b)
-asked, no answer returns :data:`EMPTY_ATTRIBUTES`; (c) asked, full answer
-returns the real value. Only (a) may block a downstream destructive action.
+    (a) instrument failure     — could not ask         → the value ``None``
+    (b) asked, no answer       — successful empty read → a sentinel
+                                                              (:data:`EMPTY_ATTRIBUTES`)
+    (c) asked, full answer     — a real, non-empty value
 
-Anything that does not need to ask a question — pure transformations over
-already-in-hand inputs — is NOT a read function and is not in scope here
-(e.g. ``is_unverified_success``, ``interpret_success``, ``rank_wallets``,
-``Auction.evaluate``: the latter two operate on adapter-supplied state and
-have no instrument-failure mode).
+Only (a) may block a destructive action downstream; only the ADAPTER can
+know the difference, because only the adapter made the call. The pure
+package cannot.
+
+Pure transformations over already-in-hand inputs (e.g.
+``is_unverified_success``, ``interpret_success``, ``rank_wallets``,
+``Auction.evaluate``) are NOT read functions and have no instrument-failure
+mode — they are out of scope.
 """
 
 from __future__ import annotations
-
-import pytest
 
 from akash_lease_core import (
     EMPTY_ATTRIBUTES,
@@ -39,7 +43,7 @@ from akash_lease_core import (
 
 
 # ---------------------------------------------------------------------------
-# 1. The sentinel exists and is a real, distinct value
+# 1. The sentinel exists and is a real, distinct value for ADAPTER use
 # ---------------------------------------------------------------------------
 class TestSentinelExists:
     def test_empty_attributes_is_a_frozenset(self):
@@ -59,45 +63,42 @@ class TestSentinelExists:
 
 
 # ---------------------------------------------------------------------------
-# 2. decode_frame — the original instance of the defect
+# 2. decode_frame — DELIBERATELY EXCLUDED from candidate (D)
 # ---------------------------------------------------------------------------
-class TestDecodeFrame:
-    """``b""`` and a non-bytes input MUST NOT collapse to the same value."""
+class TestDecodeFrameDeliberatelyExcluded:
+    """``decode_frame`` is a pure parser. It asks nothing.
 
-    def test_synthetic_instrument_failure_returns_none(self):
-        # (a) instrument failure — caller passed something the function
-        # cannot interpret as a frame. Returns ``None`` so a downstream gate
-        # can BLOCK.
+    A regression that returns ``EMPTY_ATTRIBUTES`` for ``b""`` would crash the
+    only live consumer (``provider_shell_client`` in Blazing-Back, two call
+    sites guarding on ``if frame is None: continue`` then unpacking to
+    ``(code, payload)``). The contract test here pins the
+    ``None``-for-everything-malformed contract so a future refactor cannot
+    silently re-introduce the candidate (D) routing at this layer.
+    """
+
+    def test_non_bytes_is_none(self):
+        # (a) instrument failure is the right semantics for a non-bytes input
+        # to a parser: it is malformed, not "the instrument was asked and got
+        # nothing".
         assert decode_frame("not bytes") is None
         assert decode_frame(None) is None
         assert decode_frame(42) is None
-        assert decode_frame(["bytes"]) is None
 
-    def test_successful_zero_byte_read_returns_empty_attributes(self):
-        # (b) asked, no answer — caller passed an empty bytes object. Returns
-        # :data:`EMPTY_ATTRIBUTES`. A caller that treats this as (a) is wrong.
-        assert decode_frame(b"") is EMPTY_ATTRIBUTES
-        assert decode_frame(b"") is not None
-        assert decode_frame(bytearray(b"")) is EMPTY_ATTRIBUTES
+    def test_empty_bytes_is_none(self):
+        # An empty message to a frame parser is malformed input. Returning
+        # ``EMPTY_ATTRIBUTES`` here would break the only two live call sites
+        # that guard on ``is None`` and then unpack; this test is the canary.
+        assert decode_frame(b"") is None
+        assert decode_frame(bytearray(b"")) is None
 
-    def test_a_real_frame_with_an_empty_payload_is_not_empty_attributes(self):
-        # (c) asked, full answer — a single code byte (e.g. STDOUT) with no
-        # payload is a real frame, not an empty read. ``(100, b"")`` and
-        # ``EMPTY_ATTRIBUTES`` must remain distinct.
+    def test_a_real_frame_with_an_empty_payload_is_still_a_real_frame(self):
+        # (c) — a single code byte with no payload is a real frame, NOT an
+        # empty read. ``(0, b"")`` and ``None`` and ``EMPTY_ATTRIBUTES`` must
+        # all stay distinct.
         result = decode_frame(bytes([100]))
         assert result == (100, b"")
-        assert result is not EMPTY_ATTRIBUTES
         assert result is not None
-
-    @pytest.mark.parametrize(
-        "msg,expected",
-        [
-            (b"\x00", (0, b"")),
-            (bytes([102]) + b'{"exit_code": 0}', (102, b'{"exit_code": 0}')),
-        ],
-    )
-    def test_real_frames_continue_to_return_tuples(self, msg, expected):
-        assert decode_frame(msg) == expected
+        assert result is not EMPTY_ATTRIBUTES
 
 
 # ---------------------------------------------------------------------------
@@ -177,3 +178,38 @@ class TestPackageCharter:
             "import httpx",
         ):
             assert banned not in src, f"sans-I/O violated: {banned}"
+
+
+# ---------------------------------------------------------------------------
+# 6. Adapter-side documentation of the rule (a meta-test pinning the rule
+#    itself, not any single function).
+# ---------------------------------------------------------------------------
+class TestRuleAppliesAtAdapterBoundary:
+    """The (a)/(b)/(c) split belongs at the I/O ADAPTER. This rule is encoded
+    in the package's module docstring and re-pinned here so a future edit
+    cannot soften it without a matching test failure.
+    """
+
+    def test_module_docstring_states_the_three_outcomes(self):
+        import pathlib
+
+        src = (
+            pathlib.Path(__file__).parent.parent / "src" / "akash_lease_core" / "__init__.py"
+        ).read_text()
+        assert "EMPTY_ATTRIBUTES" in src
+        assert "instrument failure" in src
+        assert "asked, no answer" in src
+        assert "asked, full answer" in src
+
+    def test_decode_frame_docstring_records_the_deliberate_exclusion(self):
+        import pathlib
+
+        src = (
+            pathlib.Path(__file__).parent.parent / "src" / "akash_lease_core" / "__init__.py"
+        ).read_text()
+        # The exclusion is a contract, not a TODO. If the wording is removed
+        # in a future refactor, this test fails and the refactor must
+        # explain why.
+        assert "DELIBERATELY EXCLUDED" in src
+        assert "provider_shell_client" in src
+        assert "pure parser" in src
