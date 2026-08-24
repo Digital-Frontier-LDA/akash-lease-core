@@ -44,8 +44,20 @@ class TestDecodeFrame:
     def test_bytearray(self):
         assert decode_frame(bytearray([RESULT]) + bytearray(b"{}")) == (102, b"{}")
 
-    def test_empty_is_none(self):
-        assert decode_frame(b"") is None
+    def test_empty_bytes_is_empty_attributes_not_none(self):
+        """A successful zero-byte read must NOT collapse to ``None``.
+
+        Candidate D (#17). The pre-fix contract returned ``None`` for ``b""``
+        and for non-bytes inputs alike, so a caller that gated on
+        ``result is None`` to block a destructive action treated "asked, got
+        nothing" as "instrument failure" — which it is not. The fix returns
+        :data:`EMPTY_ATTRIBUTES` for ``b""`` and reserves ``None`` strictly
+        for non-bytes inputs.
+        """
+        from akash_lease_core import EMPTY_ATTRIBUTES
+
+        assert decode_frame(b"") is EMPTY_ATTRIBUTES
+        assert decode_frame(b"") is not None
 
     def test_non_bytes_is_none(self):
         assert decode_frame("nope") is None

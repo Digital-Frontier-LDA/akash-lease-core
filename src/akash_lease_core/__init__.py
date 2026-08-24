@@ -28,6 +28,23 @@ lease-shell exec. It occurs with empty stdout in at least two real cases:
 
 Callers that need a trustworthy verdict must supply a ``marker`` (require the
 echoed token in stdout) or set ``require_stdout``.
+
+Read-function sentinel contract (candidate D, #17)
+--------------------------------------------------
+Every public read function in this package distinguishes **three** outcomes on a
+single axis:
+
+    (a) instrument failure    — could not ask         (the value ``None``)
+    (b) asked, no answer      — successful empty read (the value ``EMPTY_ATTRIBUTES``)
+    (c) asked, full answer    — a real, non-empty value
+
+Only outcome (a) may be allowed to BLOCK a destructive action downstream — and
+the destructive-action caller must be the one that checks for it, not the read
+function itself. Conflating (a) and (b) — returning the same value for "the
+instrument could not ask" and "the instrument read nothing" — silently disarms
+the destructive-action gate; measured instance in a consumer: a sweeper that
+closed a 200 GiB volume three times because its liveness read returned the
+same value on a 404 as on a transport failure. See ``tests/test_discipline.py``.
 """
 
 from __future__ import annotations
@@ -66,6 +83,7 @@ __all__ = [
     "STDIN",
     "RESIZE",
     "MAX_URL_CMD_BYTES",
+    "EMPTY_ATTRIBUTES",
     "MalformedResultFrame",
     "decode_frame",
     "parse_result_exit_code",
@@ -109,6 +127,13 @@ RESIZE = 105
 # length limits (~8 KB).
 MAX_URL_CMD_BYTES = 4096
 
+# Sentinel for the (b) "asked, no answer" outcome of every public read function.
+# A destructive-action gate that compares against ``None`` MUST block; a value
+# equal to ``EMPTY_ATTRIBUTES`` MUST NOT be conflated with ``None``. See the
+# module-level "Read-function sentinel contract" docstring above. Frozen so
+# identity equality is reliable across calls.
+EMPTY_ATTRIBUTES: frozenset = frozenset()
+
 
 class MalformedResultFrame(ValueError):
     """A RESULT(102) payload could not be parsed into an exit code."""
@@ -123,14 +148,28 @@ _JSON_PARSE_FAILED = object()
 # ---------------------------------------------------------------------------
 # Frame codec
 # ---------------------------------------------------------------------------
-def decode_frame(msg: object) -> tuple[int, bytes] | None:
+def decode_frame(msg: object) -> tuple[int, bytes] | None | frozenset:
     """Split a raw binary frame into ``(code, payload)``.
 
-    Returns ``None`` for anything that is not a valid frame (non-bytes, or an
-    empty message), so callers can simply skip it.
+    Three-way outcome per the module-level sentinel contract:
+
+    * ``None`` — instrument failure (could not ask): ``msg`` is not bytes at all
+      (e.g. ``str``, ``None``, an integer). The caller must treat this as
+      "blocking any downstream destructive action".
+    * :data:`EMPTY_ATTRIBUTES` — asked, no answer: ``msg`` is exactly ``b""``,
+      a successful zero-byte read. The caller MUST NOT treat this as a failure;
+      routing it to the (a) branch is the defect candidate D documents.
+    * ``(code, payload)`` — a real frame. A frame with a code byte and an empty
+      payload (e.g. ``b"\\x00"``) is valid and returns ``(0, b"")``.
+
+    A destructive action that previously gated on ``if result is None`` is wrong
+    on (b); the test ``test_decode_frame_distinguishes_empty_from_failure``
+    pins this and is the canary.
     """
-    if not isinstance(msg, (bytes, bytearray)) or len(msg) < 1:
+    if not isinstance(msg, (bytes, bytearray)):
         return None
+    if len(msg) < 1:
+        return EMPTY_ATTRIBUTES
     return msg[0], bytes(msg[1:])
 
 
