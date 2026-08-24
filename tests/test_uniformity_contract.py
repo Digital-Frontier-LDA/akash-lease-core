@@ -295,6 +295,5 @@ def test_conformance_fixture_table_replays_to_expected_winners():
         result = _replay(policy, observations, now=now)
         assert result.selected is not None, label
         assert result.selected.provider == expected, (
-            f"fixture {label!r} expected {expected!r}, "
-            f"got {result.selected.provider!r}"
+            f"fixture {label!r} expected {expected!r}, got {result.selected.provider!r}"
         )

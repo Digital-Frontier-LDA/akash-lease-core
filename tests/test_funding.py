@@ -23,8 +23,15 @@ CONSOLE = AllowanceQuantity.CONSOLE_DEPLOY_CREDIT
 
 # (hh:mm:ss as seconds-since-midnight, ACT) — measured, not synthesised.
 MEASURED = [
-    (73275, 6.29), (73352, 1.29), (73420, 1.29), (73460, 1.29), (73502, 1.29),
-    (73550, 6.29), (73571, 11.29), (73669, 6.29), (73849, 1.29),
+    (73275, 6.29),
+    (73352, 1.29),
+    (73420, 1.29),
+    (73460, 1.29),
+    (73502, 1.29),
+    (73550, 6.29),
+    (73571, 11.29),
+    (73669, 6.29),
+    (73849, 1.29),
 ]
 SERIES = [
     AllowanceSample("akash1cklqag", ONCHAIN, int(round(act * 1_000_000)), float(t))
@@ -32,7 +39,9 @@ SERIES = [
 ]
 
 
-def _old_two_sample_projection(a1: int, a2: int, gap_s: int, horizon_s: int, floor_uact: int) -> bool:
+def _old_two_sample_projection(
+    a1: int, a2: int, gap_s: int, horizon_s: int, floor_uact: int
+) -> bool:
     """The REPLACED logic, verbatim in shape — akash-runner.yml:486.
 
         projected = a2 - drop * (HORIZON / GAP)
@@ -100,7 +109,7 @@ def test_mutation_the_old_projection_flips_on_sampling_phase_and_the_new_gate_do
     )
 
     # ⇒ The quantised gate reads the LEVEL and agrees with itself.
-    new_straddling = evaluate_funding([SERIES[6], SERIES[7]])          # 11.29 → 6.29
+    new_straddling = evaluate_funding([SERIES[6], SERIES[7]])  # 11.29 → 6.29
     new_flat = evaluate_funding([AllowanceSample("akash1cklqag", ONCHAIN, 6_290_000, 99.0)])
     assert new_straddling.status is FundingStatus.ABOVE_FLOOR
     assert new_flat.status is FundingStatus.ABOVE_FLOOR
@@ -177,8 +186,12 @@ def test_empty_input_is_undetermined():
 
 def test_required_deposits_scales_the_floor():
     s = [AllowanceSample("s", ONCHAIN, 6_290_000, 1.0)]
-    assert evaluate_funding(s, FundingPolicy(required_deposits=2)).status is FundingStatus.BELOW_FLOOR
-    assert evaluate_funding(s, FundingPolicy(required_deposits=1)).status is FundingStatus.ABOVE_FLOOR
+    assert (
+        evaluate_funding(s, FundingPolicy(required_deposits=2)).status is FundingStatus.BELOW_FLOOR
+    )
+    assert (
+        evaluate_funding(s, FundingPolicy(required_deposits=1)).status is FundingStatus.ABOVE_FLOOR
+    )
 
 
 def test_amount_zero_is_below_floor_not_undetermined():

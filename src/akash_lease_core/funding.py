@@ -31,10 +31,10 @@ current level already reflects it, so it is not evidence of a future fall.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Iterable, Optional, Sequence
 
 __all__ = [
     "AllowanceQuantity",
@@ -92,7 +92,7 @@ class AllowanceSample:
 
     slot: str
     quantity: AllowanceQuantity
-    amount_uact: Optional[int]
+    amount_uact: int | None
     observed_at: float = 0.0
 
     def __post_init__(self) -> None:
@@ -125,9 +125,9 @@ class FundingDecision:
     """The verdict, and the evidence it rests on."""
 
     status: FundingStatus
-    slot: Optional[str]
-    quantity: Optional[AllowanceQuantity]
-    headroom_deposits: Optional[int]
+    slot: str | None
+    quantity: AllowanceQuantity | None
+    headroom_deposits: int | None
     reason: str
     version: str = "funding-gate/v1"
 
@@ -143,7 +143,7 @@ def _act(uact: int) -> str:
 
 def evaluate_funding(
     samples: Iterable[AllowanceSample],
-    policy: Optional[FundingPolicy] = None,
+    policy: FundingPolicy | None = None,
 ) -> FundingDecision:
     """Decide from a QUANTISED model — count deposits, never fit a line.
 
@@ -160,15 +160,22 @@ def evaluate_funding(
     samples = list(samples)
     if not samples:
         return FundingDecision(
-            FundingStatus.UNDETERMINED, None, None, None,
-            "no samples supplied — nothing was measured", policy.version,
+            FundingStatus.UNDETERMINED,
+            None,
+            None,
+            None,
+            "no samples supplied — nothing was measured",
+            policy.version,
         )
 
     gating = [s for s in samples if s.quantity is AllowanceQuantity.ONCHAIN_SPEND_LIMITS]
     if not gating:
         seen = ", ".join(sorted({s.quantity.value for s in samples}))
         return FundingDecision(
-            FundingStatus.UNDETERMINED, None, None, None,
+            FundingStatus.UNDETERMINED,
+            None,
+            None,
+            None,
             f"no on-chain authz spend_limits sample; only read [{seen}], which does not "
             f"gate a create — refusing to answer off the wrong quantity",
             policy.version,
@@ -187,7 +194,10 @@ def evaluate_funding(
 
     if not latest:
         return FundingDecision(
-            FundingStatus.UNDETERMINED, None, AllowanceQuantity.ONCHAIN_SPEND_LIMITS, None,
+            FundingStatus.UNDETERMINED,
+            None,
+            AllowanceQuantity.ONCHAIN_SPEND_LIMITS,
+            None,
             f"all {len(gating)} on-chain sample(s) were UNREADABLE — cannot determine "
             f"funding. This is not zero.",
             policy.version,
@@ -202,14 +212,18 @@ def evaluate_funding(
 
     if headroom >= policy.required_deposits:
         return FundingDecision(
-            FundingStatus.ABOVE_FLOOR, best_slot, AllowanceQuantity.ONCHAIN_SPEND_LIMITS,
+            FundingStatus.ABOVE_FLOOR,
+            best_slot,
+            AllowanceQuantity.ONCHAIN_SPEND_LIMITS,
             headroom,
             f"{best_slot} holds {_act(int(best.amount_uact))} = {headroom} whole deposit(s) "
             f"of {_act(policy.deposit_uact)}; need {policy.required_deposits}",
             policy.version,
         )
     return FundingDecision(
-        FundingStatus.BELOW_FLOOR, best_slot, AllowanceQuantity.ONCHAIN_SPEND_LIMITS,
+        FundingStatus.BELOW_FLOOR,
+        best_slot,
+        AllowanceQuantity.ONCHAIN_SPEND_LIMITS,
         headroom,
         f"best slot {best_slot} holds {_act(int(best.amount_uact))} = {headroom} whole "
         f"deposit(s); need {policy.required_deposits}. Escrow is RECOVERABLE — closing a "
@@ -218,7 +232,9 @@ def evaluate_funding(
     )
 
 
-def step_deltas(samples: Sequence[AllowanceSample], policy: Optional[FundingPolicy] = None) -> list[int]:
+def step_deltas(
+    samples: Sequence[AllowanceSample], policy: FundingPolicy | None = None
+) -> list[int]:
     """Diagnostics only: consecutive changes expressed in whole deposits.
 
     ⚠ NEVER feed this to the decision. It exists so an operator can SEE that the
@@ -230,5 +246,8 @@ def step_deltas(samples: Sequence[AllowanceSample], policy: Optional[FundingPoli
     readable = [s for s in samples if s.amount_uact is not None]
     return [
         (int(b.amount_uact) - int(a.amount_uact)) // policy.deposit_uact  # type: ignore[arg-type]
-        for a, b in zip(readable, readable[1:])
+        # strict=False is REQUIRED, not a default: the two arguments are the same
+        # list offset by one, so their lengths are n and n-1 BY DESIGN. strict=True
+        # would raise on every non-empty input.
+        for a, b in zip(readable, readable[1:], strict=False)
     ]
