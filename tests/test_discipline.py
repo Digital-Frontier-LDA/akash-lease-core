@@ -188,25 +188,63 @@ class TestRuleAppliesAtAdapterBoundary:
     """The (a)/(b)/(c) split belongs at the I/O ADAPTER. This rule is encoded
     in the package's module docstring and re-pinned here so a future edit
     cannot soften it without a matching test failure.
+
+    CodeRabbit finding on the first PR (#18): the prose originally read "every
+    public read function in this package", which contradicted the
+    ``decode_proxy_payload`` compliance pin (``""`` -> ``b""``, not the
+    sentinel). The narrowed wording splits the contract into two groups and
+    pins the structure here.
     """
 
-    def test_module_docstring_states_the_three_outcomes(self):
+    def _src(self) -> str:
         import pathlib
 
-        src = (
+        return (
             pathlib.Path(__file__).parent.parent / "src" / "akash_lease_core" / "__init__.py"
         ).read_text()
+
+    def test_module_docstring_states_the_two_groups(self):
+        src = self._src()
+        # Group 1 (pure parsers) and Group 2 (adapter read functions) are
+        # both named. A future edit that drops either group fails this test
+        # and forces the editor to explain the change in the PR.
+        assert "Group 1" in src
+        assert "pure parsers" in src
+        assert "Group 2" in src
+        assert "adapter" in src.lower()
+
+    def test_module_docstring_scopes_the_sentinel_to_adapters(self):
+        src = self._src()
+        # The original bug: the prose claimed the sentinel applied to "every
+        # public read function", but decode_proxy_payload returns ``b""``,
+        # not the sentinel. The narrowed wording must explicitly say the
+        # rule binds the ADAPTER, not the package's pure parsers.
+        assert "NOT bound by the sentinel rule" in src
+        assert "BOUND by the" in src
+        # And it must call out the type-appropriate empties so a reader
+        # cannot derive a contract the package does not honour.
+        assert "TYPE-APPROPRIATE empties" in src
+        for empty in ('b""', "()", '""', "0"):
+            assert empty in src, f"empty representation {empty!r} not pinned"
+
+    def test_module_docstring_states_the_three_outcomes(self):
+        # The three (a)/(b)/(c) outcomes are stated in the Group 2 block.
+        # Pin them so a future edit that drops any one forces a test failure.
+        src = self._src()
         assert "EMPTY_ATTRIBUTES" in src
         assert "instrument failure" in src
         assert "asked, no answer" in src
         assert "asked, full answer" in src
 
-    def test_decode_frame_docstring_records_the_deliberate_exclusion(self):
-        import pathlib
+    def test_module_docstring_narrows_the_wording_from_every_public_function(self):
+        # CodeRabbit's specific complaint: the prior prose said "every public
+        # read function in this package" — false. The narrowed prose must
+        # NOT use that broad phrasing.
+        src = self._src()
+        assert "Every public read function in this package" not in src
 
-        src = (
-            pathlib.Path(__file__).parent.parent / "src" / "akash_lease_core" / "__init__.py"
-        ).read_text()
+    def test_decode_frame_docstring_records_the_deliberate_exclusion(self):
+        src = self._src()
         # The exclusion is a contract, not a TODO. If the wording is removed
         # in a future refactor, this test fails and the refactor must
         # explain why.
