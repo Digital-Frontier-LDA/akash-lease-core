@@ -11,6 +11,8 @@ from __future__ import annotations
 import pytest
 
 from akash_lease_core import (
+    BID_WINDOW_SECONDS,
+    DEFAULT_MIN_AGE_SECONDS,
     LeaseEvidence,
     OrderObservation,
     OrderPolicy,
@@ -64,14 +66,48 @@ def test_KNOWN_NEGATIVE_an_order_five_minutes_old_is_never_closeable():
 # --- the age floor ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("age", [0.0, 96.0, 138.0, 450.0, 7199.0])
+@pytest.mark.parametrize("age", [0.0, 96.0, 138.0, 174.0, 450.0, 899.0])
 def test_anything_below_the_floor_is_refused(age):
-    """96s and 138s are the real population that was nearly closed mid-auction."""
+    """96s/138s were nearly closed by one operator; 174s (2.9 min) is the
+    youngest of the 17 a second operator independently matched 40 minutes later.
+    450s is the bid window itself — being exactly at it is not past it."""
     assert evaluate_order(obs(age_seconds=age)).status is OrderStatus.TOO_YOUNG
 
 
 def test_exactly_at_the_floor_is_allowed():
-    assert evaluate_order(obs(age_seconds=7200.0)).status is OrderStatus.CLOSEABLE
+    assert evaluate_order(obs(age_seconds=DEFAULT_MIN_AGE_SECONDS)).status is OrderStatus.CLOSEABLE
+
+
+def test_the_floor_is_DERIVED_from_the_bid_window_not_a_literal():
+    """If someone replaces the derivation with a magic number, this fails and the
+    reader is sent back to the measurement instead of inheriting a constant."""
+    assert DEFAULT_MIN_AGE_SECONDS == BID_WINDOW_SECONDS * 2.0
+    assert DEFAULT_MIN_AGE_SECONDS == 900.0
+
+
+def test_the_floor_clears_the_bid_window_with_margin():
+    """The whole justification for a SHORT floor: past the window an all-open
+    order can never acquire a lease, so it is dead rather than pending."""
+    assert DEFAULT_MIN_AGE_SECONDS > BID_WINDOW_SECONDS
+
+
+def test_the_LIVE_CI_POPULATION_is_refused_and_the_DEAD_one_is_recovered():
+    """The measured 17: youngest 2.9 min (live, mid-auction), oldest 32.0 min
+    (past the window, definitively dead). The floor must split them."""
+    youngest = evaluate_order(obs(dseq="live", age_seconds=2.9 * 60))
+    oldest = evaluate_order(obs(dseq="dead", age_seconds=32.0 * 60))
+    assert youngest.status is OrderStatus.TOO_YOUNG, youngest.reason
+    assert oldest.status is OrderStatus.CLOSEABLE, oldest.reason
+
+
+def test_the_old_2h_floor_would_have_stranded_the_recoverable_ones():
+    """Why the floor moved: at 2h the 32-minute order — provably dead — is still
+    refused, and its escrow stays stranded for hours."""
+    from akash_lease_core import OrderPolicy as _P
+
+    assert evaluate_order(obs(age_seconds=32.0 * 60), _P(min_age_seconds=7200.0)).status is (
+        OrderStatus.TOO_YOUNG
+    )
 
 
 def test_an_unreadable_age_is_undetermined_not_old_enough():
@@ -250,3 +286,55 @@ def test_a_negative_lease_count_is_rejected():
 def test_a_bool_is_not_a_lease_count():
     with pytest.raises(ValueError):
         obs(lease_count=True)
+
+
+# --- the leaked-order family: all groups open ------------------------------------
+
+
+def test_a_mixed_group_state_is_not_the_leaked_order_family():
+    d = evaluate_order(obs(group_states=("open", "closed")))
+    assert d.status is OrderStatus.NOT_OPEN_ORDER, d.reason
+
+
+def test_an_all_closed_order_is_not_the_family_either():
+    assert evaluate_order(obs(group_states=("closed",))).status is OrderStatus.NOT_OPEN_ORDER
+
+
+def test_all_open_across_several_groups_is_the_family():
+    assert (
+        evaluate_order(obs(group_states=("open", "open", "open"))).status is OrderStatus.CLOSEABLE
+    )
+
+
+def test_an_unrecognised_group_state_is_undetermined():
+    assert evaluate_order(obs(group_states=("frobnicated",))).status is OrderStatus.UNDETERMINED
+
+
+# --- the family conjunct ---------------------------------------------------------
+
+
+def test_a_family_restriction_excludes_everything_outside_it():
+    pol = OrderPolicy(required_name_prefixes=("dfci-infra-",))
+    assert evaluate_order(obs(name="consul-server"), pol).status is OrderStatus.EXCLUDED
+
+
+def test_a_family_restriction_admits_what_is_inside_it():
+    pol = OrderPolicy(required_name_prefixes=("dfci-infra-",))
+    assert evaluate_order(obs(name="dfci-infra-app"), pol).status is OrderStatus.CLOSEABLE
+
+
+def test_no_family_restriction_is_the_permissive_default():
+    assert evaluate_order(obs(name="anything-at-all")).status is OrderStatus.CLOSEABLE
+
+
+# --- attribution-free selector ---------------------------------------------------
+
+
+def test_the_observation_carries_no_attribution_field():
+    """Only 2 of 67 live deployments carry an owner id, so a selector keyed on
+    ci_run_id/owner_scope would match NONE of the leaked orders. If someone adds
+    such a field here, this fails and sends them to the upstream stamp-on-create
+    fix instead."""
+    fields = set(OrderObservation.__dataclass_fields__)
+    forbidden = {"ci_run_id", "owner_scope", "run_id", "attribution"}
+    assert not (fields & forbidden), f"attribution leaked into the selector: {fields & forbidden}"

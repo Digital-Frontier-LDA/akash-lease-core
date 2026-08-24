@@ -106,6 +106,8 @@ from .funding import (
     step_deltas,
 )
 from .orders import (
+    BID_WINDOW_SAFETY_FACTOR,
+    BID_WINDOW_SECONDS,
     DEFAULT_MIN_AGE_SECONDS,
     DEFAULT_PROTECTED_DSEQS,
     LeaseEvidence,
@@ -169,6 +171,8 @@ __all__ = [
     "evaluate_funding",
     "step_deltas",
     "rank_wallets",
+    "BID_WINDOW_SAFETY_FACTOR",
+    "BID_WINDOW_SECONDS",
     "DEFAULT_MIN_AGE_SECONDS",
     "DEFAULT_PROTECTED_DSEQS",
     "LeaseEvidence",

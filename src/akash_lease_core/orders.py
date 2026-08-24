@@ -49,14 +49,39 @@ failed safe and skipped everything, which is the only reason it was noticed.
 
 SAFETY RULES, learned by nearly breaking them
 ---------------------------------------------
-* **AGE FLOOR (default 2h).** Thirteen orders 1.6–2.3 MINUTES old were nearly
-  closed — live CI mid-auction. The bid window is ~450s; 2h is 16x past it.
+* **AGE FLOOR — the load-bearing conjunct, proven twice INDEPENDENTLY.**
+  Thirteen orders 1.6–2.3 MINUTES old were nearly closed once; forty minutes
+  later a second operator reproduced the same population from scratch — the raw
+  ``all groups open AND <family>`` predicate matched **17 orders / 85.00 ACT**,
+  oldest 32.0 min, youngest 2.9 min. With the floor applied: **0**.
+  ⇒ The bare predicate SELECTS LIVE CI MID-AUCTION. That was not one unlucky
+  near-miss; it is what the predicate does without this conjunct. A sweep that
+  closes on the predicate alone destroys running CI.
+  The floor is DERIVED from the bid window (see ``BID_WINDOW_SECONDS``), not
+  chosen, so it can be checked against the measurement rather than trusted.
 * **RE-VERIFY IMMEDIATELY BEFORE THE DELETE.** One dseq went ACTIVE between the
   scan and the close. ``confirm_close`` exists to make the scan verdict
   non-binding: a batch decision is a CANDIDATE, never an authorisation.
 * **EXCLUDE sibling-repo objects** on the shared wallet, and keep the explicit
   protected list.
 * **BATCH CAP (default 20).**
+
+⛔ THE SELECTOR IS ATTRIBUTION-FREE, AND MUST STAY THAT WAY
+-----------------------------------------------------------
+Only 2 of 67 live deployments carry an owner id at all (``dfci-infra-app``
+0/50, ``consul`` 0/7). A close path keyed on ``ci_run_id`` or ``owner_scope``
+would select **none** of the leaked orders — including the 14 measured
+stranding escrow right now. So the predicate is deliberately
+``all groups open`` + age + family + not-sibling, and nothing else. Stamping
+identity at create time is a real fix, but it is UPSTREAM of this sweep, not a
+dependency of it. Do not add an attribution term here to make the selector feel
+more precise; it would make it select nothing.
+
+⚠ ON RATES: 14 orders stranded in roughly 30 minutes is an EXISTENCE PROOF that
+the create/close asymmetry is generating new leak, not a throughput figure. One
+window cannot separate a burst from a steady state — the same reason a
+two-sample allowance projection is unsound (see ``funding``). This module
+therefore reports no rate and derives nothing from elapsed volume.
 """
 
 from __future__ import annotations
@@ -66,6 +91,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 __all__ = [
+    "BID_WINDOW_SECONDS",
+    "BID_WINDOW_SAFETY_FACTOR",
     "DEFAULT_MIN_AGE_SECONDS",
     "DEFAULT_PROTECTED_DSEQS",
     "LeaseEvidence",
@@ -80,11 +107,26 @@ __all__ = [
     "select_batch",
 ]
 
-# 16x the ~450s bid window. Not a round number chosen for taste: the population
-# that nearly got closed was 1.6-2.3 minutes old.
-DEFAULT_MIN_AGE_SECONDS = 7200.0
+# ⭐ THE FLOOR IS DERIVED, NOT CHOSEN. Do not replace it with a literal.
+#
+# Bids expire roughly 5 minutes after the ORDER opens, and the runner collects
+# bids for ~450s. So an all-groups-`open` order older than its bid window can
+# never acquire a lease: no new bid will arrive and any prior bid has expired.
+# Past that point the order is definitively DEAD, not pending — which is the
+# distinction that makes a short floor principled rather than merely brave.
+BID_WINDOW_SECONDS = 450.0
+
+# 2x the window. Not taste: it is the smallest multiple that clears the window
+# with margin, and it costs ~15 minutes of stranded escrow instead of the ~2h an
+# unexplained conservative floor was costing. A justified 15m beats an
+# unexplained 2h — the reader can check this number against the measurement.
+BID_WINDOW_SAFETY_FACTOR = 2.0
+
+DEFAULT_MIN_AGE_SECONDS = BID_WINDOW_SECONDS * BID_WINDOW_SAFETY_FACTOR  # 900.0s
 
 DEFAULT_PROTECTED_DSEQS = frozenset({"1784532174413"})
+
+_KNOWN_GROUP_STATES = frozenset({"open", "active", "closed", "insufficient_funds", "paused"})
 
 
 class LeaseEvidence(str, Enum):
@@ -116,6 +158,7 @@ class OrderStatus(str, Enum):
     PROTECTED = "protected"
     EXCLUDED = "excluded"
     NOT_ACTIVE = "not_active"
+    NOT_OPEN_ORDER = "not_open_order"
     UNDETERMINED = "undetermined"
 
 
@@ -156,6 +199,11 @@ class OrderPolicy:
     min_age_seconds: float = DEFAULT_MIN_AGE_SECONDS
     batch_limit: int = 20
     protected_dseqs: frozenset[str] = field(default_factory=lambda: DEFAULT_PROTECTED_DSEQS)
+    # ⚠ The FAMILY conjunct. Empty means "no family restriction", which is the
+    # right default for a shared core but is NOT what a sweeper should run with:
+    # the measured predicate is `all groups open AND <family> AND age AND
+    # not-sibling`. A consumer sweeping a real wallet should set this.
+    required_name_prefixes: tuple[str, ...] = ()
     excluded_name_prefixes: tuple[str, ...] = ("just-akash-",)
     excluded_owner_substrings: tuple[str, ...] = ("borduas",)
     version: str = "leaked-order-sweep/v1"
@@ -208,6 +256,15 @@ def evaluate_order(obs: OrderObservation, policy: OrderPolicy | None = None) -> 
     if why is not None:
         return OrderDecision(obs.dseq, OrderStatus.EXCLUDED, why)
 
+    if policy.required_name_prefixes and not any(
+        (obs.name or "").startswith(pre) for pre in policy.required_name_prefixes
+    ):
+        return OrderDecision(
+            obs.dseq,
+            OrderStatus.EXCLUDED,
+            f"name {obs.name!r} is outside the swept family {policy.required_name_prefixes}",
+        )
+
     if not obs.lease_evidence.may_authorise_close:
         return OrderDecision(
             obs.dseq,
@@ -236,16 +293,28 @@ def evaluate_order(obs: OrderObservation, policy: OrderPolicy | None = None) -> 
             f"{obs.lease_count} lease(s) — a workload may be running",
         )
 
-    # Corroboration. A group that is not `open` contradicts "no lease"; two
-    # instruments disagreeing is not a tiebreak, it is an unknown.
+    # Corroboration, and the population definition. The leak family is
+    # "every group still `open`" — no provider ever took the order.
     if obs.group_states is not None:
-        disagreeing = tuple(s for s in obs.group_states if s not in ("open", "closed"))
-        if disagreeing:
+        unknown = tuple(g for g in obs.group_states if g not in _KNOWN_GROUP_STATES)
+        if unknown:
+            return OrderDecision(
+                obs.dseq, OrderStatus.UNDETERMINED, f"unrecognised group state(s) {unknown}"
+            )
+        # An ACTIVE group with zero leases is two instruments disagreeing. That is
+        # an unknown, never a tiebreak in favour of the convenient answer.
+        contradicting = tuple(g for g in obs.group_states if g == "active")
+        if contradicting:
             return OrderDecision(
                 obs.dseq,
                 OrderStatus.UNDETERMINED,
-                f"lease_count is 0 but group states {disagreeing} are not open/closed "
-                f"— instruments disagree",
+                "lease_count is 0 but a group reports active — instruments disagree",
+            )
+        if not obs.group_states or not all(g == "open" for g in obs.group_states):
+            return OrderDecision(
+                obs.dseq,
+                OrderStatus.NOT_OPEN_ORDER,
+                f"group states {obs.group_states} are not all open — not the leaked-order family",
             )
 
     if obs.age_seconds is None:
