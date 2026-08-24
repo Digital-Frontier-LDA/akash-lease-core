@@ -8,6 +8,8 @@ nothing, so each limb below is also driven in both directions.
 
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from akash_lease_core import (
@@ -338,3 +340,52 @@ def test_the_observation_carries_no_attribution_field():
     fields = set(OrderObservation.__dataclass_fields__)
     forbidden = {"ci_run_id", "owner_scope", "run_id", "attribution"}
     assert not (fields & forbidden), f"attribution leaked into the selector: {fields & forbidden}"
+
+
+# ── #20 review findings (CodeRabbit): non-finite inputs and unknown escrow VALUES
+#
+# Both sit in the safety-critical path and both are this module's own documented
+# contract applied one level down -- to VALUES rather than SHAPES, and to floats
+# that pass every comparison.
+
+
+class TestNaNCannotDisableTheAgeFloor:
+    """KP. NaN passes every comparison, so it silently removes the age conjunct.
+
+    ⛔ Measured twice tonight: the bare all-groups-open predicate selects live CI
+    orders 2.9 minutes into their auction. The age floor is the only conjunct
+    standing between this module and destroying them, so an input that disables
+    it WITHOUT erroring is the most dangerous value this module accepts.
+    """
+
+    def test_a_nan_age_on_the_observation_is_rejected(self):
+        with pytest.raises(ValueError, match="finite"):
+            obs(age_seconds=math.nan)
+
+    def test_a_nan_floor_in_the_policy_is_rejected(self):
+        with pytest.raises(ValueError, match="finite"):
+            OrderPolicy(min_age_seconds=math.nan)
+
+    def test_an_infinite_age_is_rejected_too(self):
+        with pytest.raises(ValueError, match="finite"):
+            obs(age_seconds=math.inf)
+
+
+class TestAnUnrecognisedEscrowValueIsNoneNotClosed:
+    """KP. `False` reads as "already reclaimed" -- an unknown state must not."""
+
+    def test_closing_is_not_reported_as_closed(self):
+        assert parse_escrow_open({"state": {"state": "closing"}}) is None
+
+    def test_an_unknown_state_string_is_none(self):
+        assert parse_escrow_open({"state": {"state": "overdrawn"}}) is None
+
+    def test_open_and_closed_still_resolve(self):
+        """KN. The fix must not make every value unknown.
+
+        A parser that returned None for everything would satisfy both KPs above
+        and refuse the entire population -- indistinguishable from a working
+        sweep that finds nothing.
+        """
+        assert parse_escrow_open({"state": {"state": "open"}}) is True
+        assert parse_escrow_open({"state": {"state": "closed"}}) is False

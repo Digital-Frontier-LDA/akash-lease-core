@@ -86,6 +86,7 @@ therefore reports no rate and derives nothing from elapsed volume.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
@@ -188,8 +189,14 @@ class OrderObservation:
                 raise ValueError("lease_count must be an int or None (None = unreadable)")
             if self.lease_count < 0:
                 raise ValueError("lease_count must be non-negative")
-        if self.age_seconds is not None and self.age_seconds < 0:
-            raise ValueError("age_seconds must be non-negative")
+        if self.age_seconds is not None:
+            # ⛔ NaN PASSES EVERY COMPARISON. `NaN < 0` is False, so a NaN age
+            # passed this guard AND made every downstream `age >= floor`
+            # comparison False -- turning an order of UNKNOWN age into CLOSEABLE.
+            if not math.isfinite(self.age_seconds):
+                raise ValueError("age_seconds must be finite -- NaN/inf disable the age floor")
+            if self.age_seconds < 0:
+                raise ValueError("age_seconds must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +216,13 @@ class OrderPolicy:
     version: str = "leaked-order-sweep/v1"
 
     def __post_init__(self) -> None:
+        # ⛔ A NaN FLOOR DISABLES THE AGE GATE ENTIRELY, while a reader still sees
+        # a configured floor. Strictly worse than a floor of 0. The age conjunct
+        # is the only thing separating this predicate from live CI: measured
+        # twice tonight, the bare predicate selected orders 2.9 MINUTES into
+        # their auction.
+        if not math.isfinite(self.min_age_seconds):
+            raise ValueError("min_age_seconds must be finite -- NaN/inf disable the age floor")
         if self.min_age_seconds < 0:
             raise ValueError("min_age_seconds must be non-negative")
         if self.batch_limit < 1:
@@ -373,7 +387,17 @@ def parse_escrow_open(escrow: object) -> bool | None:
         state = state.get("state")
     if not isinstance(state, str) or not state:
         return None
-    return state == "open"
+    # ⛔ THREE OUTCOMES, NOT TWO. `state == "open"` collapsed every unrecognised
+    # value to False, and False READS AS "already reclaimed" -- so "closing",
+    # "overdrawn" or any future state reported an OPEN escrow as closed, i.e.
+    # nothing left to recover. An unrecognised VALUE is the same claim as an
+    # unrecognised SHAPE two lines above ("we could not tell") and resolves the
+    # same way. False is returned ONLY for the value we recognise as closed.
+    if state == "open":
+        return True
+    if state == "closed":
+        return False
+    return None
 
 
 def page_is_last(page: Sequence[object], limit: int) -> bool:
