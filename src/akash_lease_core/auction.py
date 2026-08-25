@@ -165,7 +165,7 @@ class Auction:
             price=observation.price,
             denom=observation.denom,
             observed_at=current.observed_at,  # <-- first sighting preserved
-            state=observation.state,          # <-- mutable field refreshed
+            state=observation.state,  # <-- mutable field refreshed
         )
 
     def observe_many(
