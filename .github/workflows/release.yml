@@ -1,0 +1,110 @@
+# Cut a release from a tag, and make the artifact NAME part of the contract.
+#
+# ⛔⛔ WHY THIS EXISTS: CONSUMERS CONSTRUCT THE DOWNLOAD URL BY HAND.
+# Every consumer pins this library as a direct wheel URL, not from an index:
+#
+#   akash-lease-core @ https://github.com/Digital-Frontier-LDA/akash-lease-core/
+#     releases/download/v0.8.0/akash_lease_core-0.8.0-py3-none-any.whl#sha256=...
+#
+# That URL is assembled from THREE things that can drift independently: the git
+# TAG, the `version` in pyproject.toml, and the wheel FILENAME hatchling emits.
+# If the tag says v0.9.0 while pyproject still says 0.8.0, the wheel is named
+# ...-0.8.0-... and the URL a consumer builds from the tag 404s. Releases were cut
+# by hand, so nothing checked that they agreed.
+#
+# ⚠ A 404 here is not a loud failure. `pip install` of an unreachable URL fails at
+# BUILD time in a consumer's CI, one repo away, and reads as that repo's problem.
+#
+# The tag is the human decision to publish; this only refuses to publish something
+# whose URL will not resolve.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and publish the tagged wheel
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload assets
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      # ── THE GUARD, BEFORE ANYTHING IS BUILT OR PUBLISHED ──────────────────
+      - name: Tag and pyproject version must agree
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          TAG_VERSION="${TAG#v}"
+          PROJ_VERSION="$(python3 -c '
+          import tomllib, pathlib
+          print(tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"])
+          ')"
+          echo "tag=${TAG}  tag_version=${TAG_VERSION}  pyproject=${PROJ_VERSION}"
+          if [ "$TAG_VERSION" != "$PROJ_VERSION" ]; then
+            echo "::error title=Tag/version mismatch::tag ${TAG} implies version ${TAG_VERSION}, but pyproject.toml says ${PROJ_VERSION}. Every consumer builds its wheel URL from the TAG, so this release would publish a wheel named akash_lease_core-${PROJ_VERSION}-py3-none-any.whl at a path consumers expect to hold ${TAG_VERSION} — a 404 at pip-install time in a DIFFERENT repo. Bump pyproject.toml and re-tag."
+            exit 1
+          fi
+          echo "TAG_VERSION=${TAG_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Build sdist and wheel
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet build
+          python3 -m build
+
+      # ⚠ Building the right version is not the same as EMITTING the right
+      #   filename. hatchling normalises `akash-lease-core` to `akash_lease_core`,
+      #   and a consumer's URL hardcodes that spelling. Assert the exact name
+      #   rather than trusting the convention to hold across a build-backend bump.
+      - name: The wheel must be named exactly what consumers pin
+        run: |
+          set -euo pipefail
+          EXPECTED="akash_lease_core-${TAG_VERSION}-py3-none-any.whl"
+          if [ ! -f "dist/${EXPECTED}" ]; then
+            BUILT="$(find dist -maxdepth 1 -type f -printf '%f ' 2>/dev/null || find dist -maxdepth 1 -type f -exec basename {} \; | tr '\n' ' ')"
+            echo "::error title=Unexpected wheel name::expected dist/${EXPECTED}; built: ${BUILT}"
+            exit 1
+          fi
+          echo "sha256: $(python3 -c "
+          import hashlib,pathlib
+          print(hashlib.sha256(pathlib.Path('dist/${EXPECTED}').read_bytes()).hexdigest())
+          ")"
+          find dist -maxdepth 1 -type f -exec ls -l {} +
+
+      # ⭐ The sha256 a consumer pins is printed in the job summary, so bumping a
+      #    consumer does not require downloading the artifact to compute it.
+      - name: Emit the exact requirements line for consumers
+        run: |
+          set -euo pipefail
+          W="akash_lease_core-${TAG_VERSION}-py3-none-any.whl"
+          SHA="$(python3 -c "
+          import hashlib,pathlib
+          print(hashlib.sha256(pathlib.Path('dist/${W}').read_bytes()).hexdigest())
+          ")"
+          {
+            echo "### Consumer pin for \`${GITHUB_REF_NAME}\`"
+            echo ''
+            echo '```'
+            echo "akash-lease-core @ https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${W}#sha256=${SHA}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the release and attach the artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes
