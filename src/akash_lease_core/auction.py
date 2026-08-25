@@ -19,6 +19,24 @@ from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
 
+from .capacity import ProviderCapacity
+
+
+class PreferredSelection(str, Enum):
+    """How to choose AMONG preferred bids once the collection window closes.
+
+    ⚠ This changes only the choice among PREFERRED bids. The window semantics,
+    the fallback rule, and the eligibility filters are untouched -- an emptiest
+    policy that also relaxed eligibility would be two changes wearing one name.
+    """
+
+    CHEAPEST = "cheapest"
+    #: Highest AVAILABLE FRACTION on the binding dimension. Motivated by a
+    #: measured fleet imbalance: one datacenter runs <10% utilised while its
+    #: siblings run ~50%, so cheapest-first crowds the busy providers and a
+    #: three-region placement fails on the ones with no room.
+    EMPTIEST = "emptiest"
+
 
 class AuctionStatus(str, Enum):
     """State returned by :meth:`Auction.evaluate`."""
@@ -43,6 +61,9 @@ class BidObservation:
     observed_at: float
     state: str = "open"
     proofs: tuple[str, ...] = ()
+    #: Provider headroom at observation time. ``None`` = not measured,
+    #: which is distinct from "measured as full" -- see ProviderCapacity.
+    capacity: ProviderCapacity | None = None
 
     def __post_init__(self) -> None:
         if not self.bid_key:
@@ -70,6 +91,7 @@ class AuctionPolicy:
     eligible_providers: frozenset[str] | None = None
     excluded_providers: frozenset[str] = field(default_factory=frozenset)
     required_proofs: frozenset[str] = field(default_factory=frozenset)
+    preferred_selection: PreferredSelection = PreferredSelection.CHEAPEST
     version: str = "provider-auction/v2"
 
     def __post_init__(self) -> None:
@@ -180,7 +202,12 @@ class Auction:
         for observation in observations:
             self.observe(observation)
 
-    def evaluate(self, *, now: float) -> AuctionResult:
+    def evaluate(
+        self,
+        *,
+        now: float,
+        already_selected: frozenset[str] | None = None,
+    ) -> AuctionResult:
         """Return collection state or the deterministic terminal decision."""
 
         if not math.isfinite(now):
@@ -245,11 +272,46 @@ class Auction:
             )
 
         if preferred:
-            selected = min(pool, key=lambda item: (item.price, item.provider, item.bid_key))
-            reason = "cheapest_preferred"
-            considered = tuple(
-                sorted(pool, key=lambda item: (item.price, item.provider, item.bid_key))
-            )
+            emptiest = self.policy.preferred_selection is PreferredSelection.EMPTIEST
+            readable = [
+                item for item in pool if item.capacity is not None and item.capacity.is_readable
+            ]
+            if emptiest and readable:
+                # ⭐ ANTI-AFFINITY FIRST, headroom second.
+                #
+                # A multi-region deployment evaluates several auctions against ONE
+                # capacity snapshot. Without this term all of them see the same
+                # emptiest provider and all of them choose it -- a thundering herd
+                # that is strictly WORSE than cheapest-first, which at least has a
+                # stable price tiebreak. Emptiest-first only delivers "room in all
+                # three" if a provider already taken this round steps aside.
+                #
+                # ⚠ It DEPRIORITISES, it does not exclude. If the already-chosen
+                # provider is the only preferred bidder, taking it beats failing
+                # to place -- so this changes the ORDER, never the eligibility.
+                taken = already_selected or frozenset()
+
+                def rank(item: BidObservation) -> tuple:
+                    frac = item.capacity.available_fraction()  # type: ignore[union-attr]
+                    return (item.provider in taken, -frac, item.price, item.provider, item.bid_key)
+
+                selected = min(readable, key=rank)
+                reason = "emptiest_preferred"
+                considered = tuple(sorted(readable, key=rank))
+            else:
+                selected = min(pool, key=lambda item: (item.price, item.provider, item.bid_key))
+                # ⛔ A degraded selection MUST NOT report as the mode that was
+                # asked for. Silently returning "cheapest_preferred" here would
+                # make an unmeasurable fleet indistinguishable from a fleet that
+                # was measured and happened to agree.
+                reason = (
+                    "emptiest_unavailable_fell_back_to_cheapest"
+                    if emptiest
+                    else "cheapest_preferred"
+                )
+                considered = tuple(
+                    sorted(pool, key=lambda item: (item.price, item.provider, item.bid_key))
+                )
         else:
             selected = min(pool, key=lambda item: (item.observed_at, item.provider, item.bid_key))
             reason = "first_eligible_fallback"

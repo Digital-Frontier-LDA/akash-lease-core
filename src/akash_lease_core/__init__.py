@@ -93,8 +93,10 @@ from .auction import (
     AuctionStatus,
     BidObservation,
     MixedBidDenominations,
+    PreferredSelection,
     RejectedBid,
 )
+from .capacity import ProviderCapacity
 from .funding import (
     DEPOSIT_UACT,
     AllowanceQuantity,
@@ -131,6 +133,8 @@ from .wallets import (
 )
 
 __all__ = [
+    "PreferredSelection",
+    "ProviderCapacity",
     "STDOUT",
     "STDERR",
     "RESULT",
