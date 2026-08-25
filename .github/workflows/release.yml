@@ -72,14 +72,15 @@ jobs:
           set -euo pipefail
           EXPECTED="akash_lease_core-${TAG_VERSION}-py3-none-any.whl"
           if [ ! -f "dist/${EXPECTED}" ]; then
-            echo "::error title=Unexpected wheel name::expected dist/${EXPECTED}; built: $(ls dist/ | tr '\n' ' ')"
+            BUILT="$(find dist -maxdepth 1 -type f -printf '%f ' 2>/dev/null || find dist -maxdepth 1 -type f -exec basename {} \; | tr '\n' ' ')"
+            echo "::error title=Unexpected wheel name::expected dist/${EXPECTED}; built: ${BUILT}"
             exit 1
           fi
           echo "sha256: $(python3 -c "
           import hashlib,pathlib
           print(hashlib.sha256(pathlib.Path('dist/${EXPECTED}').read_bytes()).hexdigest())
           ")"
-          ls -l dist/
+          find dist -maxdepth 1 -type f -exec ls -l {} +
 
       # ⭐ The sha256 a consumer pins is printed in the job summary, so bumping a
       #    consumer does not require downloading the artifact to compute it.
