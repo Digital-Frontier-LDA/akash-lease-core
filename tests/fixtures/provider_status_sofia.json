@@ -12,10 +12,10 @@
               "storage_ephemeral": 896743440705
             },
             "available": {
-              "cpu": 195,
+              "cpu": 945,
               "gpu": 0,
-              "memory": 114911084544,
-              "storage_ephemeral": 358798786881
+              "memory": 115984826368,
+              "storage_ephemeral": 360409399617
             }
           },
           {
@@ -27,10 +27,10 @@
               "storage_ephemeral": 896743440705
             },
             "available": {
-              "cpu": 12420,
+              "cpu": 1550,
               "gpu": 0,
-              "memory": 121685229568,
-              "storage_ephemeral": 134917325121
+              "memory": 90882260992,
+              "storage_ephemeral": 17342595393
             }
           },
           {
@@ -42,10 +42,10 @@
               "storage_ephemeral": 896743440705
             },
             "available": {
-              "cpu": 4045,
+              "cpu": 45,
               "gpu": 0,
-              "memory": 213162283008,
-              "storage_ephemeral": 885469151553
+              "memory": 195982413824,
+              "storage_ephemeral": 842519478593
             }
           },
           {
@@ -57,10 +57,10 @@
               "storage_ephemeral": 895717416872
             },
             "available": {
-              "cpu": 1065,
+              "cpu": 635,
               "gpu": 0,
               "memory": 0,
-              "storage_ephemeral": 247586641320
+              "storage_ephemeral": 246512899496
             }
           },
           {
@@ -72,10 +72,10 @@
               "storage_ephemeral": 895717416872
             },
             "available": {
-              "cpu": 53450,
+              "cpu": 39450,
               "gpu": 0,
-              "memory": 97187160064,
-              "storage_ephemeral": 766868397992
+              "memory": 37057617920,
+              "storage_ephemeral": 616544542632
             }
           },
           {
@@ -87,9 +87,9 @@
               "storage_ephemeral": 896771278350
             },
             "available": {
-              "cpu": 40380,
+              "cpu": 40430,
               "gpu": 0,
-              "memory": 52505837568,
+              "memory": 52572946432,
               "storage_ephemeral": 457610872334
             }
           }

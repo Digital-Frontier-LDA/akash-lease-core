@@ -20,7 +20,7 @@ import pytest
 
 from akash_lease_core import ProviderCapacity, from_provider_status
 
-FIXTURE = Path(__file__).parent / "fixtures" / "provider_status_h6i.json"
+FIXTURE = Path(__file__).parent / "fixtures" / "provider_status_sofia.json"
 
 
 @pytest.fixture()
