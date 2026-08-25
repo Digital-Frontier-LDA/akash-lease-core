@@ -651,3 +651,47 @@ def test_fallback_selection_uses_first_arrival_when_bid_re_observed():
     )
     assert result.selected.observed_at == 10.0
     assert result.selection_reason == "first_eligible_fallback"
+
+
+def test_re_observation_preserves_proofs_and_every_other_field() -> None:
+    """A re-observed bid keeps its ARRIVAL and loses nothing else.
+
+    The first version of the first-sighting fix rebuilt BidObservation field by
+    field and passed 6 of 7, so `proofs` silently fell back to its default of
+    ``()`` on every re-observation — `evaluate()` would then report required
+    proofs as missing even though the latest observation supplied them. That is
+    the same defect class the fix exists to remove, one field over.
+
+    This asserts the property that makes it structural: `observed_at` is the ONLY
+    field taken from the stored copy. Anything a future field is, it is refreshed
+    from the newest observation rather than dropped.
+    """
+    auction = Auction(
+        policy=AuctionPolicy(preferred_providers=("p",), collection_window_seconds=60),
+        started_at=0.0,
+    )
+    auction.observe(
+        BidObservation(
+            bid_key="k",
+            provider="p",
+            price=Decimal(5),
+            denom="uakt",
+            observed_at=10.0,
+            proofs=("a",),
+        )
+    )
+    auction.observe(
+        BidObservation(
+            bid_key="k",
+            provider="p",
+            price=Decimal(4),
+            denom="uakt",
+            observed_at=15.0,
+            proofs=("a", "b"),
+        )
+    )
+    stored = auction._latest_by_key["k"]
+
+    assert stored.observed_at == 10.0, "first sighting must survive re-observation"
+    assert stored.proofs == ("a", "b"), "proofs must be REFRESHED, not dropped to ()"
+    assert stored.price == Decimal(4), "price must be refreshed"

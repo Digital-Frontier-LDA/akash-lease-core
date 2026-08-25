@@ -15,7 +15,7 @@ The contract is intentionally small:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from enum import Enum
 
@@ -159,13 +159,17 @@ class Auction:
                 f"from {current.provider!r} to {observation.provider!r}"
             )
         # Re-observation: KEEP first arrival, REFRESH mutable state.
-        self._latest_by_key[observation.bid_key] = BidObservation(
-            bid_key=observation.bid_key,
-            provider=observation.provider,
-            price=observation.price,
-            denom=observation.denom,
-            observed_at=current.observed_at,  # <-- first sighting preserved
-            state=observation.state,  # <-- mutable field refreshed
+        # `replace` rather than a field-by-field rebuild: this is FIELD-COMPLETE by
+        # construction, so a field added to BidObservation later cannot be silently
+        # dropped here. The hand-written rebuild this replaces passed 6 of 7 fields and
+        # lost `proofs` to its default of () on every re-observation — the same defect
+        # class as the one this method exists to fix, one field over.
+        #
+        # observed_at is the ONLY field taken from the stored copy: it is the bid's
+        # arrival, not its latest sighting. Everything else (price, state, proofs) is
+        # mutable and the newest observation is authoritative.
+        self._latest_by_key[observation.bid_key] = replace(
+            observation, observed_at=current.observed_at
         )
 
     def observe_many(
