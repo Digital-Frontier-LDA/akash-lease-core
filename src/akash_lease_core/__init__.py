@@ -96,7 +96,7 @@ from .auction import (
     PreferredSelection,
     RejectedBid,
 )
-from .capacity import ProviderCapacity
+from .capacity import ProviderCapacity, from_provider_status
 from .funding import (
     DEPOSIT_UACT,
     AllowanceQuantity,
@@ -135,6 +135,7 @@ from .wallets import (
 __all__ = [
     "PreferredSelection",
     "ProviderCapacity",
+    "from_provider_status",
     "STDOUT",
     "STDERR",
     "RESULT",

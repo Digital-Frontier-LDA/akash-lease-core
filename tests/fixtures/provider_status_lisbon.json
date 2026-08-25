@@ -1,0 +1,310 @@
+{
+  "cluster": {
+    "inventory": {
+      "available": {
+        "nodes": [
+          {
+            "name": "aphrodite",
+            "allocatable": {
+              "cpu": 55400,
+              "gpu": 1,
+              "memory": 269396963328,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 225,
+              "gpu": 1,
+              "memory": 134686873600,
+              "storage_ephemeral": 442733298658
+            }
+          },
+          {
+            "name": "apollo",
+            "allocatable": {
+              "cpu": 71400,
+              "gpu": 2,
+              "memory": 404680134656,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 13225,
+              "gpu": 2,
+              "memory": 219504179200,
+              "storage_ephemeral": 367571370978
+            }
+          },
+          {
+            "name": "ares",
+            "allocatable": {
+              "cpu": 55400,
+              "gpu": 2,
+              "memory": 269396852736,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 51225,
+              "gpu": 2,
+              "memory": 264609523712,
+              "storage_ephemeral": 882967446498
+            }
+          },
+          {
+            "name": "artemis",
+            "allocatable": {
+              "cpu": 71400,
+              "gpu": 2,
+              "memory": 404680519680,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 67225,
+              "gpu": 2,
+              "memory": 399893190656,
+              "storage_ephemeral": 882967446498
+            }
+          },
+          {
+            "name": "atlas",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 540777631744,
+              "storage_ephemeral": 3542138532529
+            },
+            "available": {
+              "cpu": 24375,
+              "gpu": 0,
+              "memory": 401820809216,
+              "storage_ephemeral": 3099756901041
+            }
+          },
+          {
+            "name": "chronos",
+            "allocatable": {
+              "cpu": 48000,
+              "gpu": 4,
+              "memory": 270205759488,
+              "storage_ephemeral": 884016022498
+            },
+            "available": {
+              "cpu": 43825,
+              "gpu": 4,
+              "memory": 265418430464,
+              "storage_ephemeral": 884016022498
+            }
+          },
+          {
+            "name": "demeter",
+            "allocatable": {
+              "cpu": 55400,
+              "gpu": 1,
+              "memory": 269397635072,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 51080,
+              "gpu": 1,
+              "memory": 264039880704,
+              "storage_ephemeral": 882967446498
+            }
+          },
+          {
+            "name": "dionysus",
+            "allocatable": {
+              "cpu": 31400,
+              "gpu": 0,
+              "memory": 134117224448,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 15895,
+              "gpu": 0,
+              "memory": 93862860800,
+              "storage_ephemeral": 663924114402
+            }
+          },
+          {
+            "name": "eos",
+            "allocatable": {
+              "cpu": 56000,
+              "gpu": 0,
+              "memory": 101088645120,
+              "storage_ephemeral": 440997469478
+            },
+            "available": {
+              "cpu": 37300,
+              "gpu": 0,
+              "memory": 58269169664,
+              "storage_ephemeral": 317180836134
+            }
+          },
+          {
+            "name": "hades",
+            "allocatable": {
+              "cpu": 71400,
+              "gpu": 0,
+              "memory": 404680384512,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 36755,
+              "gpu": 0,
+              "memory": 319362418688,
+              "storage_ephemeral": 655334179810
+            }
+          },
+          {
+            "name": "hecate",
+            "allocatable": {
+              "cpu": 64000,
+              "gpu": 0,
+              "memory": 540782694400,
+              "storage_ephemeral": 884016022498
+            },
+            "available": {
+              "cpu": 33035,
+              "gpu": 0,
+              "memory": 441456764928,
+              "storage_ephemeral": 508206384098
+            }
+          },
+          {
+            "name": "helios",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 100979892224,
+              "storage_ephemeral": 3542138532529
+            },
+            "available": {
+              "cpu": 54695,
+              "gpu": 0,
+              "memory": 57695143936,
+              "storage_ephemeral": 3461607895729
+            }
+          },
+          {
+            "name": "hephaestus",
+            "allocatable": {
+              "cpu": 55400,
+              "gpu": 0,
+              "memory": 269397585920,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 27215,
+              "gpu": 0,
+              "memory": 187462326272,
+              "storage_ephemeral": 674661532642
+            }
+          },
+          {
+            "name": "hermes",
+            "allocatable": {
+              "cpu": 55400,
+              "gpu": 2,
+              "memory": 269397131264,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 50225,
+              "gpu": 2,
+              "memory": 263382968320,
+              "storage_ephemeral": 882967446498
+            }
+          },
+          {
+            "name": "hestia",
+            "allocatable": {
+              "cpu": 64000,
+              "gpu": 1,
+              "memory": 540782436352,
+              "storage_ephemeral": 440997469478
+            },
+            "available": {
+              "cpu": 59825,
+              "gpu": 1,
+              "memory": 535995107328,
+              "storage_ephemeral": 440997469478
+            }
+          },
+          {
+            "name": "nike",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 811359719424,
+              "storage_ephemeral": 3542138532529
+            },
+            "available": {
+              "cpu": 33850,
+              "gpu": 0,
+              "memory": 709753174016,
+              "storage_ephemeral": 3110494319281
+            }
+          },
+          {
+            "name": "persephone",
+            "allocatable": {
+              "cpu": 64000,
+              "gpu": 2,
+              "memory": 540782796800,
+              "storage_ephemeral": 884016022498
+            },
+            "available": {
+              "cpu": 59825,
+              "gpu": 2,
+              "memory": 535995467776,
+              "storage_ephemeral": 884016022498
+            }
+          },
+          {
+            "name": "prometheus",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 608423669760,
+              "storage_ephemeral": 3542138532529
+            },
+            "available": {
+              "cpu": 35345,
+              "gpu": 0,
+              "memory": 511128868864,
+              "storage_ephemeral": 3238806467249
+            }
+          },
+          {
+            "name": "selene",
+            "allocatable": {
+              "cpu": 64000,
+              "gpu": 1,
+              "memory": 540776374272,
+              "storage_ephemeral": 884016022498
+            },
+            "available": {
+              "cpu": 60075,
+              "gpu": 1,
+              "memory": 536056154112,
+              "storage_ephemeral": 884016022498
+            }
+          },
+          {
+            "name": "zeus",
+            "allocatable": {
+              "cpu": 143400,
+              "gpu": 1,
+              "memory": 539956359168,
+              "storage_ephemeral": 882967446498
+            },
+            "available": {
+              "cpu": 139225,
+              "gpu": 1,
+              "memory": 535169030144,
+              "storage_ephemeral": 882967446498
+            }
+          }
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "cluster": {
+    "inventory": {
+      "available": {
+        "nodes": [
+          {
+            "name": "server04",
+            "allocatable": {
+              "cpu": 47400,
+              "gpu": 0,
+              "memory": 134127276032,
+              "storage_ephemeral": 3399371067906
+            },
+            "available": {
+              "cpu": 440,
+              "gpu": 0,
+              "memory": 18706790400,
+              "storage_ephemeral": 3103018324482
+            }
+          },
+          {
+            "name": "server05",
+            "allocatable": {
+              "cpu": 47400,
+              "gpu": 0,
+              "memory": 134127267840,
+              "storage_ephemeral": 847546661098
+            },
+            "available": {
+              "cpu": 8455,
+              "gpu": 0,
+              "memory": 105043968,
+              "storage_ephemeral": 491601246442
+            }
+          },
+          {
+            "name": "server06",
+            "allocatable": {
+              "cpu": 47400,
+              "gpu": 0,
+              "memory": 134128115712,
+              "storage_ephemeral": 847546661098
+            },
+            "available": {
+              "cpu": 1485,
+              "gpu": 0,
+              "memory": 26971420672,
+              "storage_ephemeral": 616692168938
+            }
+          },
+          {
+            "name": "server07",
+            "allocatable": {
+              "cpu": 64000,
+              "gpu": 0,
+              "memory": 134791487488,
+              "storage_ephemeral": 3400419643906
+            },
+            "available": {
+              "cpu": 25335,
+              "gpu": 0,
+              "memory": 21619148800,
+              "storage_ephemeral": 3145405960706
+            }
+          }
+        ]
+      }
+    }
+  }
+}
