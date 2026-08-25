@@ -64,6 +64,19 @@ class BidObservation:
     #: Provider headroom at observation time. ``None`` = not measured,
     #: which is distinct from "measured as full" -- see ProviderCapacity.
     capacity: ProviderCapacity | None = None
+    #: The order GROUP this bid is for.
+    #:
+    #: ⛔ ``None`` means NOT SUPPLIED, and it must never be read as 1.
+    #: just-akash#195: `_cheapest_bid` picks a bid across ALL groups and the
+    #: leasing path then leases `gseq=1` regardless -- so a winning bid for
+    #: group 7 is leased as group 1 and the lease FAILS. Selecting a bid
+    #: without carrying its group is what makes that mismatch EXPRESSIBLE.
+    #:
+    #: Measured there: splitting an order into groups roughly DOUBLES the bid
+    #: rate (74.9% of 191 vs 36.6% of 303), because a provider that can satisfy
+    #: some of twelve resources cannot bid at all when they are one indivisible
+    #: group. That gain is unreachable until the winner names its own group.
+    gseq: int | None = None
 
     def __post_init__(self) -> None:
         if not self.bid_key:
@@ -78,6 +91,14 @@ class BidObservation:
         object.__setattr__(self, "price", price)
         if not math.isfinite(self.observed_at):
             raise ValueError("observed_at must be finite")
+        if self.gseq is not None:
+            # A bool is an int in Python; `gseq=True` would silently mean group 1.
+            if isinstance(self.gseq, bool) or not isinstance(self.gseq, int):
+                raise ValueError("gseq must be an int or None (None = not supplied)")
+            if self.gseq < 1:
+                # Akash groups are 1-based. A 0 here is the shape a missing value
+                # takes when someone defaults an absent field to zero.
+                raise ValueError("gseq must be >= 1 -- Akash group sequences are 1-based")
         object.__setattr__(self, "proofs", tuple(self.proofs))
 
 
