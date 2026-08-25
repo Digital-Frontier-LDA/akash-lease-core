@@ -517,3 +517,137 @@ def test_fallback_path_also_reports_missing_proofs_on_selected_winner():
     assert result.selected is not None
     assert result.selected.provider == "hurricane"
     assert result.missing_required_proofs == ("lease_liveness_proof",)
+
+
+# ─── first-seen contract: re-observation must not erase the first sighting ───
+#
+# ⛔ THE DEFECT THIS REGRESSION GUARDS. `Auction.observe` used to replace a stored
+# bid whenever `observed_at >= current.observed_at`, so a real adapter that polls
+# every 3 s would rewrite every bid's recorded arrival to its LATEST sighting.
+# With every observed bid carrying the last poll's timestamp, "first observed"
+# degenerated into a tie-break on provider/bid_key and the FALLBACK RULE chose by
+# the last index, not by arrival. Every observe-once unit test still passed
+# because the bug only appears when the same bid is observed twice.
+#
+# `console_api_backend.poll_bids` already guards this on the Console path (see
+# `first_seen` in control-plane/api/services/console_api_backend.py:319-354 of
+# Borduas-Holdings/Blazing-Back). PR #1586's `BidAuction.observe_raw` carries the
+# same guard on the raw-polling path. The fix below lifts the guard into the
+# core so every consumer inherits it — and this test pins it.
+
+
+def test_observe_preserves_first_sighting_when_same_bid_re_observed():
+    """The same `bid_key` observed twice must keep its FIRST arrival time.
+
+    Setup: a real Console poll loop stamps every bid with the monotonic time of
+    the poll that saw it. A later poll that re-sees the same bid carries a
+    strictly-later timestamp. If the core overwrites on `>=`, the FIRST arrival
+    is silently rewritten to the latest poll — every bid still in the candidate
+    pool shares the last poll's timestamp, "first observed" becomes a tie-break,
+    and the FALLBACK RULE breaks under real polling while every observe-once
+    unit test still passes.
+    """
+    auction = Auction(AuctionPolicy(), started_at=0)
+    first_seen_at = 10.0
+    later_re_observed_at = 13.0  # strictly later, as a real second poll stamps
+
+    auction.observe(
+        BidObservation(
+            bid_key="akash1provider/1/1",
+            provider="akash1provider",
+            price=Decimal("5"),
+            denom="uakt",
+            observed_at=first_seen_at,
+            state="open",
+        )
+    )
+    auction.observe(
+        BidObservation(
+            bid_key="akash1provider/1/1",
+            provider="akash1provider",
+            price=Decimal("5"),
+            denom="uakt",
+            observed_at=later_re_observed_at,
+            state="open",
+        )
+    )
+
+    stored = auction._latest_by_key["akash1provider/1/1"]
+    assert stored.observed_at == first_seen_at, (
+        f"observe() rewrote the first sighting's arrival: "
+        f"got {stored.observed_at}, expected {first_seen_at}. "
+        f"Re-observation must keep first-arrival and refresh only mutable state."
+    )
+
+
+def test_fallback_selection_uses_first_arrival_when_bid_re_observed():
+    """The FALLBACK RULE must read by first sighting, not by the last poll's timestamp.
+
+    ⛔ END-TO-END SHAPE OF THE BUG. The primary test pins the storage invariant;
+    this test pins the SELECTION invariant. Two providers bid in different polls:
+
+      poll 1 (t=10): helsinki observed
+      poll 2 (t=13): hurricane observed  (cheaper, but LATER)
+      poll 3 (t=15): helsinki RE-observed (the same `bid_key`, later timestamp)
+
+    With the broken `observe()`, helsinki carries observed_at=15 and hurricane
+    carries observed_at=13, so the fallback rule picks hurricane — the CHEAPER
+    but LATER provider. With the fix, helsinki keeps observed_at=10 (first
+    sighting) and is selected, even though hurricane is cheaper, because the
+    fallback rule is "first eligible", not "cheapest eligible".
+    """
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=30,
+            preferred_providers=frozenset({"lisbon"}),
+            eligible_providers=frozenset({"helsinki", "hurricane"}),
+        ),
+        started_at=0,
+    )
+    # Poll 1: helsinki first sighting.
+    auction.observe(
+        BidObservation(
+            bid_key="helsinki/1/1",
+            provider="helsinki",
+            price=Decimal("10"),
+            denom="uakt",
+            observed_at=10.0,
+            state="open",
+        )
+    )
+    # Poll 2: hurricane appears (cheaper, but LATER — and no preferred provider is open).
+    auction.observe(
+        BidObservation(
+            bid_key="hurricane/1/1",
+            provider="hurricane",
+            price=Decimal("3"),
+            denom="uakt",
+            observed_at=13.0,
+            state="open",
+        )
+    )
+    # Poll 3: helsinki re-observed with the LAST poll's timestamp. The broken
+    # `observe()` overwrites helsinki.observed_at from 10.0 to 15.0 here.
+    auction.observe(
+        BidObservation(
+            bid_key="helsinki/1/1",
+            provider="helsinki",
+            price=Decimal("10"),
+            denom="uakt",
+            observed_at=15.0,
+            state="open",
+        )
+    )
+
+    result = auction.evaluate(now=30)
+    assert result.status is AuctionStatus.DECIDED
+    assert result.selected is not None
+    assert result.selected.provider == "helsinki", (
+        f"fallback rule picked {result.selected.provider} at observed_at "
+        f"{result.selected.observed_at}, but the FIRST eligible fallback by arrival "
+        f"order is helsinki (first seen at 10.0). The rule is 'first eligible', "
+        f"not 'cheapest eligible' — see `_DEFAULT_FAILOVER_PRIORITY` commentary in "
+        f"Blazing-Back's bid_auction.py."
+    )
+    assert result.selected.observed_at == 10.0
+    assert result.selection_reason == "first_eligible_fallback"

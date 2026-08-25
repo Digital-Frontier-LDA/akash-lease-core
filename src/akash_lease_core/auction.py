@@ -129,16 +129,44 @@ class Auction:
         self._latest_by_key: dict[str, BidObservation] = {}
 
     def observe(self, observation: BidObservation) -> None:
-        """Record the newest state for a stable adapter-supplied bid key."""
+        """Record a `BidObservation`, preserving first arrival, refreshing mutable state.
 
+        ⛔ FIRST-ARRIVAL IS IMMUTABLE. A bid re-observed on a later poll has not
+        "arrived" twice; overwriting its `observed_at` with the later poll's time
+        would erase the ordering the FALLBACK RULE depends on. With every bid in
+        the candidate pool carrying the last poll's timestamp, "first observed"
+        degenerates into a tie-break on (provider, bid_key) and the fallback
+        selection chooses by last index, not by arrival.
+
+        ⇒ Mutable fields (price, state) ARE refreshed on later observations,
+        because a bid can legitimately change (open → closed) while arrival
+        cannot. BidObservation is frozen, so refreshing mutable fields means
+        rebuilding the instance with the FIRST `observed_at` preserved.
+
+        Matches `console_api_backend.poll_bids`'s `first_seen` shape exactly —
+        keyed on the adapter-supplied `bid_key` (typically `provider/gseq/oseq`),
+        first arrival kept, other fields refreshed. PR #1586's `BidAuction.observe_raw`
+        carries the same guard on the raw-polling path; once both consumers pin
+        this version, the adapter-level guard can be dropped.
+        """
         current = self._latest_by_key.get(observation.bid_key)
-        if current is not None and current.provider != observation.provider:
+        if current is None:
+            self._latest_by_key[observation.bid_key] = observation
+            return
+        if current.provider != observation.provider:
             raise ValueError(
                 f"bid_key {observation.bid_key!r} changed provider "
                 f"from {current.provider!r} to {observation.provider!r}"
             )
-        if current is None or observation.observed_at >= current.observed_at:
-            self._latest_by_key[observation.bid_key] = observation
+        # Re-observation: KEEP first arrival, REFRESH mutable state.
+        self._latest_by_key[observation.bid_key] = BidObservation(
+            bid_key=observation.bid_key,
+            provider=observation.provider,
+            price=observation.price,
+            denom=observation.denom,
+            observed_at=current.observed_at,  # <-- first sighting preserved
+            state=observation.state,          # <-- mutable field refreshed
+        )
 
     def observe_many(
         self, observations: list[BidObservation] | tuple[BidObservation, ...]
