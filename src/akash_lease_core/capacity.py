@@ -118,6 +118,17 @@ _STATUS_DIMENSIONS: tuple[tuple[str, str], ...] = (
 )
 
 
+def _usable(value: object) -> bool:
+    """A node-reported quantity we are willing to add.
+
+    ⚠ ``bool`` is an ``int`` subclass and must be rejected before the numeric
+    check, or ``True`` contributes one unit of CPU.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return math.isfinite(value) and value >= 0
+
+
 def _sum_nodes(nodes: object) -> dict[str, tuple[float, float]] | None:
     """Sum (available, total) per dimension across a provider's nodes."""
     if not isinstance(nodes, (list, tuple)) or not nodes:
@@ -136,15 +147,33 @@ def _sum_nodes(nodes: object) -> dict[str, tuple[float, float]] | None:
         for ours, theirs in _STATUS_DIMENSIONS:
             total = allocatable.get(theirs)
             free = available.get(theirs)
-            if isinstance(total, bool) or isinstance(free, bool):
-                # ⚠ bool is an int subclass; True would silently count as 1 unit.
+            # ⛔⛔ THE PAIR IS ATOMIC. Accepting one half and dropping the other is
+            #     how corrupt data becomes a MEASUREMENT. Guarding each value
+            #     separately -- the first version of this -- meant
+            #     {"allocatable": {"cpu": 100}, "available": {"cpu": True}} added
+            #     100 to the total and 0 to the free, yielding cpu == 0.0:
+            #     "measured, and completely full". That is the one value this
+            #     module exists to never emit from unreadable input, and it would
+            #     have sorted a healthy provider last on evidence that was garbage.
+            #     Found by CodeRabbit on #26; the bool test that was supposed to
+            #     cover it set BOTH halves to True, so the symmetric case passed
+            #     and the asymmetric one was never asked.
+            # ⚠ bool is an int subclass, so it is excluded explicitly rather than
+            #   by isinstance(x, (int, float)) -- True would count as 1 unit.
+            if not _usable(total) or not _usable(free):
                 continue
-            if isinstance(total, (int, float)) and math.isfinite(total) and total >= 0:
-                totals[ours] += float(total)
-            if isinstance(free, (int, float)) and math.isfinite(free) and free >= 0:
-                frees[ours] += float(free)
+            totals[ours] += float(total)
+            frees[ours] += float(free)
     if not seen:
         return None
+    # ⛔ AN AGGREGATE THAT OVERFLOWED IS NOT A MEASUREMENT EITHER. Two per-node
+    #    values can each be finite (1e308) and sum to inf; from_totals() would then
+    #    raise ValueError, breaking this module's documented promise that a
+    #    malformed payload yields an unreadable capacity rather than an exception.
+    #    Found by CodeRabbit on #26.
+    for ours, _ in _STATUS_DIMENSIONS:
+        if not math.isfinite(totals[ours]) or not math.isfinite(frees[ours]):
+            return None
     return {ours: (frees[ours], totals[ours]) for ours, _ in _STATUS_DIMENSIONS}
 
 

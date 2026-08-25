@@ -162,3 +162,78 @@ def test_booleans_are_rejected_rather_than_counted_as_one() -> None:
     cap = from_provider_status(status)
     assert cap.cpu is None  # cpu was skipped entirely, not counted as 1/1 = 100% free
     assert cap.memory == pytest.approx(0.5)
+
+
+def _one_node(allocatable: dict, available: dict) -> dict:
+    return {
+        "cluster": {
+            "inventory": {
+                "available": {"nodes": [{"allocatable": allocatable, "available": available}]}
+            }
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("allocatable", "available", "why"),
+    [
+        pytest.param({"cpu": 100}, {"cpu": True}, "free is a bool", id="free-bool"),
+        pytest.param({"cpu": True}, {"cpu": 10}, "total is a bool", id="total-bool"),
+        pytest.param({"cpu": 100}, {"cpu": "10"}, "free is a string", id="free-str"),
+        pytest.param({"cpu": 100}, {}, "free is absent", id="free-absent"),
+        pytest.param({"cpu": 100}, {"cpu": float("nan")}, "free is NaN", id="free-nan"),
+        pytest.param({"cpu": 100}, {"cpu": -5}, "free is negative", id="free-negative"),
+    ],
+)
+def test_a_HALF_valid_pair_is_dropped_whole_never_counted_as_zero_free(
+    allocatable: dict, available: dict, why: str
+) -> None:
+    """⛔⛔ REGRESSION, CodeRabbit on #26. The pair is atomic.
+
+    Guarding each value separately let a valid `total` through while the matching
+    `free` was rejected, so the dimension became ``0 / 100 == 0.0`` — "measured,
+    and completely full". That is the exact value this module exists never to emit
+    from unreadable input, and under EMPTIEST it sorts a healthy provider last on
+    evidence that is garbage.
+
+    ⚠ The original bool test could not catch this: it set BOTH halves to ``True``,
+    so the symmetric case passed and the asymmetric one was never asked.
+    """
+    cap = from_provider_status(_one_node(allocatable, available))
+    assert cap.cpu is None, f"{why}: expected UNREADABLE, got {cap.cpu}"
+    assert cap.available_fraction() is None
+
+
+def test_an_aggregate_that_overflows_is_unreadable_not_an_exception() -> None:
+    """⛔ REGRESSION, CodeRabbit on #26.
+
+    Each per-node value is finite, but their sum is not. `from_totals()` raises
+    ValueError on a non-finite total, which would break this module's documented
+    promise that a malformed payload yields an unreadable capacity rather than an
+    exception the caller must catch.
+    """
+    huge = 1e308
+    status = {
+        "cluster": {
+            "inventory": {
+                "available": {
+                    "nodes": [
+                        {"allocatable": {"cpu": huge}, "available": {"cpu": huge}},
+                        {"allocatable": {"cpu": huge}, "available": {"cpu": huge}},
+                    ]
+                }
+            }
+        }
+    }
+    cap = from_provider_status(status)  # must not raise
+    assert cap.available_fraction() is None
+
+
+def test_a_valid_pair_alongside_a_corrupt_one_still_measures_the_valid_dimension() -> None:
+    """The drop is per-DIMENSION, not per-node. A provider reporting good memory
+    and garbage CPU is still rankable on memory — refusing the whole node would
+    throw away a real measurement."""
+    cap = from_provider_status(_one_node({"cpu": 100, "memory": 200}, {"cpu": True, "memory": 50}))
+    assert cap.cpu is None
+    assert cap.memory == pytest.approx(0.25)
+    assert cap.available_fraction() == pytest.approx(0.25)
