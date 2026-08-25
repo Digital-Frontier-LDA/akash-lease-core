@@ -16,6 +16,7 @@ provider.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 __all__ = ["ProviderCapacity"]
@@ -99,3 +100,97 @@ class ProviderCapacity:
     @property
     def is_readable(self) -> bool:
         return self.available_fraction() is not None
+
+
+# ── provider /status adapter ────────────────────────────────────────────────
+#
+# The dimension names a provider reports are NOT the names this module uses.
+# `storage_ephemeral` is what a node advertises; `storage` is what
+# ``ProviderCapacity`` calls it. Keeping the map in one place is the whole point
+# of this adapter: every consumer that fetched `/status` itself would otherwise
+# re-derive it, and a decision must come from the primitive rather than be
+# re-derived per repo.
+_STATUS_DIMENSIONS: tuple[tuple[str, str], ...] = (
+    ("cpu", "cpu"),
+    ("memory", "memory"),
+    ("storage", "storage_ephemeral"),
+    ("gpu", "gpu"),
+)
+
+
+def _sum_nodes(nodes: object) -> dict[str, tuple[float, float]] | None:
+    """Sum (available, total) per dimension across a provider's nodes."""
+    if not isinstance(nodes, (list, tuple)) or not nodes:
+        return None
+    totals: dict[str, float] = {ours: 0.0 for ours, _ in _STATUS_DIMENSIONS}
+    frees: dict[str, float] = {ours: 0.0 for ours, _ in _STATUS_DIMENSIONS}
+    seen = False
+    for node in nodes:
+        if not isinstance(node, Mapping):
+            continue
+        allocatable = node.get("allocatable")
+        available = node.get("available")
+        if not isinstance(allocatable, Mapping) or not isinstance(available, Mapping):
+            continue
+        seen = True
+        for ours, theirs in _STATUS_DIMENSIONS:
+            total = allocatable.get(theirs)
+            free = available.get(theirs)
+            if isinstance(total, bool) or isinstance(free, bool):
+                # ⚠ bool is an int subclass; True would silently count as 1 unit.
+                continue
+            if isinstance(total, (int, float)) and math.isfinite(total) and total >= 0:
+                totals[ours] += float(total)
+            if isinstance(free, (int, float)) and math.isfinite(free) and free >= 0:
+                frees[ours] += float(free)
+    if not seen:
+        return None
+    return {ours: (frees[ours], totals[ours]) for ours, _ in _STATUS_DIMENSIONS}
+
+
+def from_provider_status(status: object) -> ProviderCapacity:
+    """Build a :class:`ProviderCapacity` from a provider's ``/status`` payload.
+
+    An Akash provider serves free capacity at ``{host_uri}/status``, under::
+
+        cluster.inventory.available.nodes[].allocatable   # total
+        cluster.inventory.available.nodes[].available     # free
+
+    This is the SANS-I/O half: the caller fetches, this parses. Keeping the fetch
+    out means the library stays testable against fixtures and carries no HTTP,
+    TLS or retry policy — the caller already owns those decisions.
+
+    ⛔ A PAYLOAD THIS CANNOT READ YIELDS AN UNREADABLE CAPACITY, NOT A FULL ONE.
+    Every failure below — absent inventory, empty node list, a schema that moved,
+    a node whose numbers are strings — returns a capacity whose
+    ``available_fraction()`` is ``None``. It never returns ``0.0``. The two are
+    opposite instructions to the auction: ``None`` means *do not rank this
+    provider*, while ``0.0`` means *measured, and completely full*, which sorts it
+    last on evidence it does not have. Under emptiest selection a provider behind
+    a flaky endpoint would then be permanently deprioritised for being unreachable
+    rather than for being busy.
+
+    ⚠ Consequently this does NOT raise on a malformed payload. Callers that need
+    to distinguish "unreadable" from "empty" should check
+    :attr:`ProviderCapacity.is_readable` — which is exactly what
+    ``Auction.evaluate`` already does before it ranks anything.
+
+    ``gpu`` needs no special case: a CPU-only provider reports ``0`` allocatable
+    GPUs, ``from_totals`` maps a zero total to ``None``, and the dimension drops
+    out of the binding minimum instead of scoring the provider 0% free.
+    """
+    if not isinstance(status, Mapping):
+        return ProviderCapacity()
+    cluster = status.get("cluster")
+    if not isinstance(cluster, Mapping):
+        return ProviderCapacity()
+    inventory = cluster.get("inventory")
+    if not isinstance(inventory, Mapping):
+        return ProviderCapacity()
+    available = inventory.get("available")
+    if not isinstance(available, Mapping):
+        return ProviderCapacity()
+    pairs = _sum_nodes(available.get("nodes"))
+    if pairs is None:
+        return ProviderCapacity()
+    return ProviderCapacity.from_totals(**pairs)

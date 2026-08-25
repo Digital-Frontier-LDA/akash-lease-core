@@ -1,0 +1,100 @@
+{
+  "cluster": {
+    "inventory": {
+      "available": {
+        "nodes": [
+          {
+            "name": "node1",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 269775273984,
+              "storage_ephemeral": 896743440705
+            },
+            "available": {
+              "cpu": 195,
+              "gpu": 0,
+              "memory": 114911084544,
+              "storage_ephemeral": 358798786881
+            }
+          },
+          {
+            "name": "node2",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 269640765440,
+              "storage_ephemeral": 896743440705
+            },
+            "available": {
+              "cpu": 12420,
+              "gpu": 0,
+              "memory": 121685229568,
+              "storage_ephemeral": 134917325121
+            }
+          },
+          {
+            "name": "node3",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 269774901248,
+              "storage_ephemeral": 896743440705
+            },
+            "available": {
+              "cpu": 4045,
+              "gpu": 0,
+              "memory": 213162283008,
+              "storage_ephemeral": 885469151553
+            }
+          },
+          {
+            "name": "node4",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 134766555136,
+              "storage_ephemeral": 895717416872
+            },
+            "available": {
+              "cpu": 1065,
+              "gpu": 0,
+              "memory": 0,
+              "storage_ephemeral": 247586641320
+            }
+          },
+          {
+            "name": "node5",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 134768123904,
+              "storage_ephemeral": 895717416872
+            },
+            "available": {
+              "cpu": 53450,
+              "gpu": 0,
+              "memory": 97187160064,
+              "storage_ephemeral": 766868397992
+            }
+          },
+          {
+            "name": "node6",
+            "allocatable": {
+              "cpu": 72000,
+              "gpu": 0,
+              "memory": 134781304832,
+              "storage_ephemeral": 896771278350
+            },
+            "available": {
+              "cpu": 40380,
+              "gpu": 0,
+              "memory": 52505837568,
+              "storage_ephemeral": 457610872334
+            }
+          }
+        ]
+      }
+    }
+  }
+}
