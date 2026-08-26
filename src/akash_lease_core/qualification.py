@@ -105,6 +105,42 @@ class QualificationPolicy:
     min_quarantine_seconds: float = 6 * 3600.0
     version: str = "provider-qualification/v1"
 
+    def __post_init__(self) -> None:
+        """⛔ A POLICY THAT CANNOT BE SATISFIED MUST NOT CONSTRUCT.
+
+        `min_observations=0` made the evidence gate unreachable and the rate a 0/0 —
+        `ZeroDivisionError` from a CONFIGURATION value, surfacing at evaluation time far
+        from the mistake. Every threshold is checked here, where the wrong number was
+        written.
+        """
+        if self.min_observations < 1:
+            raise ValueError(
+                f"min_observations must be >= 1, got {self.min_observations}: a policy "
+                "that requires no evidence cannot distinguish an unmeasured provider "
+                "from a healthy one"
+            )
+        if self.window_seconds <= 0:
+            raise ValueError(f"window_seconds must be > 0, got {self.window_seconds}")
+        if self.min_quarantine_seconds < 0:
+            raise ValueError(
+                f"min_quarantine_seconds must be >= 0, got {self.min_quarantine_seconds}"
+            )
+        for name, value in (
+            ("quarantine_below_rate", self.quarantine_below_rate),
+            ("restore_at_or_above_rate", self.restore_at_or_above_rate),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be within [0, 1], got {value}")
+        # ⚠ Refusal 4 is a PROPERTY OF THE POLICY, not only of the code path: a
+        #   restoration bar below the qualification floor would make quarantine easier to
+        #   leave than to avoid.
+        if self.restore_at_or_above_rate < self.quarantine_below_rate:
+            raise ValueError(
+                f"restore_at_or_above_rate ({self.restore_at_or_above_rate}) must be >= "
+                f"quarantine_below_rate ({self.quarantine_below_rate}): restoration must "
+                "not be easier than staying qualified"
+            )
+
 
 DEFAULT_POLICY = QualificationPolicy()
 
@@ -148,6 +184,32 @@ def evaluate_provider(
     fail = sum(1 for o in mine if o.outcome is Outcome.FAILURE)
     unc = sum(1 for o in mine if o.outcome is Outcome.UNCLASSIFIED)
 
+    # ⛔ REFUSAL 3 IS CHECKED FIRST, BECAUSE REFUSAL 1 WOULD OTHERWISE SHORT-CIRCUIT IT.
+    #   If `window_seconds` is shorter than `min_quarantine_seconds`, every observation
+    #   can age out of the window while the provider is still SERVING its quarantine.
+    #   The evidence gate below then answered INSUFFICIENT_DATA — reporting an actively
+    #   quarantined provider as merely unmeasured, which is the one reading that invites
+    #   a caller to send it work "to gather data".
+    #
+    # ⚠ `success_rate` is None here, never 0.0: with no evidence in the window a 0% would
+    #   be a measurement nobody took.
+    if quarantined_since is not None and (now - quarantined_since) < pol.min_quarantine_seconds:
+        return QualificationVerdict(
+            provider=provider,
+            status=QualificationStatus.QUARANTINED,
+            reason=(
+                f"held {now - quarantined_since:.0f}s of a "
+                f"{pol.min_quarantine_seconds:.0f}s minimum; a provider that flaps back "
+                "in costs a red required check per flap."
+            ),
+            considered=len(mine),
+            successes=succ,
+            failures=fail,
+            unclassified=unc,
+            success_rate=(succ / len(mine)) if mine else None,
+            quarantined_until=quarantined_since + pol.min_quarantine_seconds,
+        )
+
     # ⛔ REFUSAL 1. Not measured is not healthy.
     if len(mine) < pol.min_observations:
         return QualificationVerdict(
@@ -168,23 +230,7 @@ def evaluate_provider(
     rate = succ / len(mine)
 
     if quarantined_since is not None:
-        held_for = now - quarantined_since
-        # ⛔ REFUSAL 3. Serve the minimum before any restoration is considered.
-        if held_for < pol.min_quarantine_seconds:
-            return QualificationVerdict(
-                provider=provider,
-                status=QualificationStatus.QUARANTINED,
-                reason=(
-                    f"held {held_for:.0f}s of a {pol.min_quarantine_seconds:.0f}s minimum; "
-                    "a provider that flaps back in costs a red required check per flap."
-                ),
-                considered=len(mine),
-                successes=succ,
-                failures=fail,
-                unclassified=unc,
-                success_rate=rate,
-                quarantined_until=quarantined_since + pol.min_quarantine_seconds,
-            )
+        # The minimum-duration case already returned above, before the evidence gate.
         # ⛔ REFUSAL 4. Restoration needs a strictly higher bar than staying qualified.
         if rate < pol.restore_at_or_above_rate:
             return QualificationVerdict(

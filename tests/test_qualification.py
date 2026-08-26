@@ -168,3 +168,63 @@ def test_a_custom_policy_is_honoured_and_not_silently_defaulted():
     strict = QualificationPolicy(min_observations=50)
     v = evaluate_provider(P, _obs(10, Outcome.SUCCESS), NOW, policy=strict)
     assert v.status is QualificationStatus.INSUFFICIENT_DATA
+
+
+class TestReviewFindingsFromPR28:
+    """Two real defects found in review, each reproduced before it was fixed."""
+
+    def test_a_policy_requiring_no_evidence_cannot_be_constructed(self):
+        """⛔ `min_observations=0` made the evidence gate unreachable and the rate a 0/0.
+        The failure surfaced as ZeroDivisionError at EVALUATION time, far from the
+        configuration line that caused it."""
+        with pytest.raises(ValueError, match="min_observations"):
+            QualificationPolicy(min_observations=0)
+
+    @pytest.mark.parametrize(
+        "kwargs, match",
+        [
+            ({"window_seconds": 0}, "window_seconds"),
+            ({"min_quarantine_seconds": -1}, "min_quarantine_seconds"),
+            ({"quarantine_below_rate": 1.5}, "quarantine_below_rate"),
+            ({"restore_at_or_above_rate": -0.1}, "restore_at_or_above_rate"),
+            # Refusal 4 as a property of the POLICY, not just of the code path.
+            (
+                {"quarantine_below_rate": 0.9, "restore_at_or_above_rate": 0.5},
+                "not be easier than staying qualified",
+            ),
+        ],
+    )
+    def test_unsatisfiable_thresholds_are_rejected_at_construction(self, kwargs, match):
+        with pytest.raises(ValueError, match=match):
+            QualificationPolicy(**kwargs)
+
+    def test_the_default_policy_is_still_constructible(self):
+        """⭐ The control. Validation that rejects the defaults would pass every test
+        above while making the module unusable."""
+        assert QualificationPolicy().min_observations >= 1
+        assert DEFAULT_POLICY.restore_at_or_above_rate >= DEFAULT_POLICY.quarantine_below_rate
+
+    def test_an_active_quarantine_outranks_the_evidence_gate(self):
+        """⛔ REFUSAL 3 WAS SHORT-CIRCUITED BY REFUSAL 1. With a window shorter than the
+        quarantine minimum, every observation ages out while the provider is still
+        SERVING its quarantine — and the evidence gate answered INSUFFICIENT_DATA,
+        reporting an actively quarantined provider as merely unmeasured. That is the one
+        reading that invites a caller to send it work "to gather data".
+        """
+        pol = QualificationPolicy(
+            window_seconds=1.0, min_quarantine_seconds=3600.0, min_observations=5
+        )
+        stale = [ProviderObservation(P, Outcome.FAILURE, NOW - 600)] * 10
+        v = evaluate_provider(P, stale, NOW, policy=pol, quarantined_since=NOW - 600)
+        assert v.status is QualificationStatus.QUARANTINED
+        assert v.status is not QualificationStatus.INSUFFICIENT_DATA
+
+    def test_with_no_evidence_in_window_the_rate_is_none_not_zero(self):
+        """A 0% would be a measurement nobody took."""
+        pol = QualificationPolicy(
+            window_seconds=1.0, min_quarantine_seconds=3600.0, min_observations=5
+        )
+        stale = [ProviderObservation(P, Outcome.FAILURE, NOW - 600)] * 10
+        v = evaluate_provider(P, stale, NOW, policy=pol, quarantined_since=NOW - 600)
+        assert v.considered == 0
+        assert v.success_rate is None
