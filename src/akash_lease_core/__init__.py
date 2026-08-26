@@ -107,6 +107,14 @@ from .funding import (
     evaluate_funding,
     step_deltas,
 )
+from .lease_recovery import (
+    LeaseRecoveryAction,
+    LeaseRecoveryDecision,
+    LeaseState,
+    QuotaState,
+    ReadinessEvidence,
+    evaluate_lease_recovery,
+)
 from .orders import (
     BID_WINDOW_SAFETY_FACTOR,
     BID_WINDOW_SECONDS,
@@ -192,6 +200,12 @@ __all__ = [
     "evaluate_funding",
     "step_deltas",
     "rank_wallets",
+    "LeaseRecoveryAction",
+    "LeaseRecoveryDecision",
+    "LeaseState",
+    "QuotaState",
+    "ReadinessEvidence",
+    "evaluate_lease_recovery",
     "BID_WINDOW_SAFETY_FACTOR",
     "BID_WINDOW_SECONDS",
     "DEFAULT_MIN_AGE_SECONDS",
