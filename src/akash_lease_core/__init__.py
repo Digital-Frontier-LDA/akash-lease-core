@@ -123,6 +123,15 @@ from .orders import (
     parse_escrow_open,
     select_batch,
 )
+from .qualification import (
+    Outcome,
+    ProviderObservation,
+    QualificationPolicy,
+    QualificationStatus,
+    QualificationVerdict,
+    evaluate_provider,
+    qualified_set,
+)
 from .wallets import (
     RejectedWallet,
     WalletCandidate,
@@ -133,6 +142,13 @@ from .wallets import (
 )
 
 __all__ = [
+    "Outcome",
+    "ProviderObservation",
+    "QualificationPolicy",
+    "QualificationStatus",
+    "QualificationVerdict",
+    "evaluate_provider",
+    "qualified_set",
     "PreferredSelection",
     "ProviderCapacity",
     "from_provider_status",
