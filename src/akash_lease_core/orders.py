@@ -147,7 +147,15 @@ class LeaseEvidence(str, Enum):
 
 
 class OrderStatus(str, Enum):
-    """⛔ SEVEN outcomes, and only ONE of them closes anything.
+    """⛔ EIGHT outcomes, and only ONE of them closes anything.
+
+    ⚠ THIS DOCSTRING SAID "SEVEN" WHILE THE CLASS HAD EIGHT MEMBERS, and had done since
+    a member was added without the prose being counted again. A stale count in a
+    docstring is not cosmetic here: this enum is the authority three consumers derive
+    from, so a reader auditing "are all the statuses handled?" against the number in the
+    docstring would conclude a complete handler was missing one, or that an incomplete
+    one was complete. `test_status_docstring_count_matches_the_enum` now fails if the two
+    disagree, so the number cannot drift again.
 
     ``UNDETERMINED`` is not a soft no — it is the value that keeps an
     unreadable instrument from being rendered as a safe-looking zero.
