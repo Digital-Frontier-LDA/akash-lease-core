@@ -24,6 +24,7 @@ on the path that decides which provider gets PAID. So:
 
 from __future__ import annotations
 
+import ast
 import copy
 import json
 import pathlib
@@ -50,6 +51,25 @@ from akash_lease_core.capacity import ProviderCapacity
 BID_OBSERVATION_FIELDS = 9
 AUCTION_POLICY_FIELDS = 8
 PROVIDER_CAPACITY_FIELDS = 4
+
+
+def _modules_imported_by(source: str) -> set[str]:
+    """Every top-level module name `source` imports, over AST.
+
+    Structural rather than a substring search, because `"import json" in source`
+    is satisfied by a comment and — the defect this replaces — is NOT satisfied
+    by `from json import dumps`, which violates the same invariant. Relative
+    imports are excluded: `from .json import x` names a sibling module, not the
+    stdlib one.
+    """
+
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            found.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            found.add(node.module.split(".")[0])
+    return found
 
 
 def _policy(**overrides: object) -> AuctionPolicy:
@@ -162,7 +182,20 @@ class TestRoundTrip:
             pathlib.Path(__file__).parent.parent / "src" / "akash_lease_core" / "auction.py"
         ).read_text(encoding="utf-8")
 
-        assert "import json" not in source
+        assert "json" not in _modules_imported_by(source)
+
+    def test_the_no_json_scan_can_actually_see_the_defect(self):
+        """Seeded positive control.
+
+        A guard that cannot fail is not a guard. Both import forms violate the
+        invariant, and the substring check this replaced saw only the first.
+        """
+        assert "json" in _modules_imported_by("import json")
+        assert "json" in _modules_imported_by("from json import dumps")
+        assert "json" in _modules_imported_by("import json.decoder as d")
+        # ...and a relative sibling module of the same name is NOT the stdlib one
+        assert "json" not in _modules_imported_by("from .json import helper")
+        assert "json" not in _modules_imported_by("# import json, but only in prose")
 
     def test_the_snapshot_is_byte_stable_across_runs(self):
         """Sets have no order, so an unsorted dump would make one auction
@@ -576,6 +609,29 @@ class TestScopeStopsTwoOrdersMerging:
     def test_an_empty_scope_is_refused_because_it_is_not_an_identity(self):
         with pytest.raises(ValueError, match="non-empty string or None"):
             _populated().snapshot(scope="")
+
+    def test_an_empty_scope_in_the_blob_is_refused_on_the_way_back_in(self):
+        """The symmetry is load-bearing. If `snapshot()` refused "" while
+        `restore()` accepted it, a hand-written blob carrying "" and a caller
+        passing `expect_scope=""` would compare EQUAL — the identity check
+        satisfied by a value that identifies nothing, and two orders merging
+        exactly as if no scope had ever been set."""
+        snap = _populated().snapshot()
+        snap["scope"] = ""
+
+        with pytest.raises(ValueError, match="non-empty string or None"):
+            Auction.restore(snap, expect_scope="")
+
+    def test_an_empty_expect_scope_is_refused_against_an_unscoped_snapshot(self):
+        with pytest.raises(ValueError, match="non-empty string or None"):
+            Auction.restore(_populated().snapshot(), expect_scope="")
+
+    def test_a_non_string_scope_in_the_blob_is_refused(self):
+        snap = _populated().snapshot()
+        snap["scope"] = 24680
+
+        with pytest.raises(ValueError, match="non-empty string or None"):
+            Auction.restore(snap, expect_scope="dseq:24680")
 
 
 # ---------------------------------------------------------------------------

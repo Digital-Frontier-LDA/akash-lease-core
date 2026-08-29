@@ -352,6 +352,31 @@ _CODECS: dict[str, tuple[_Encode, _Decode]] = {
 }
 
 
+def _validate_scope(value: object, where: str) -> str | None:
+    """A scope is an identity, or it is absent. The empty string is neither.
+
+    ⛔ REFUSED AT BOTH ENDS, and that symmetry is the point. If ``snapshot``
+    refused ``""`` while ``restore`` accepted it, the identity check would still
+    be satisfiable by a value that identifies nothing: a hand-written blob
+    carrying ``""`` and a caller passing ``expect_scope=""`` compare EQUAL, so
+    the refusal never fires and two orders merge exactly as if no scope had ever
+    been set. ``None`` is how "this snapshot has no scope" is said.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{where}: expected a non-empty string or None, got {type(value).__name__}"
+        )
+    if not value:
+        raise ValueError(
+            f"{where}: expected a non-empty string or None -- the empty string "
+            "identifies nothing, and None is how a snapshot says it has no scope"
+        )
+    return value
+
+
 def _codec_for(owner: type, spec: Field) -> tuple[_Encode, _Decode]:
     """The (encode, decode) pair for one dataclass field, or a loud refusal."""
 
@@ -499,8 +524,7 @@ class Auction:
             for. If set, :meth:`restore` REQUIRES a matching ``expect_scope``.
         """
 
-        if scope is not None and (not isinstance(scope, str) or not scope):
-            raise ValueError("scope must be a non-empty string or None")
+        scope = _validate_scope(scope, "scope")
         return {
             "version": AUCTION_SNAPSHOT_VERSION,
             "scope": scope,
@@ -543,11 +567,13 @@ class Auction:
           two auctions were written into; ``observe`` would silently keep one.
         * **A ``scope`` mismatch raises**, in both directions: a snapshot that
           names its order restored by a caller that does not say which order it
-          expects is refused just as loudly as a disagreement.
+          expects is refused just as loudly as a disagreement. An EMPTY scope is
+          refused on both sides too -- it would satisfy the check while
+          identifying nothing.
 
         :param expect_scope: the order identity the caller believes it is
             resuming. Must equal the snapshot's ``scope``; ``None`` matches only
-            a snapshot that carries no scope.
+            a snapshot that carries no scope, and ``""`` is refused outright.
         :param rebase_started_at: re-anchor the timeline. Every ``observed_at``
             shifts by the same delta, so relative arrival is preserved exactly.
         """
@@ -574,11 +600,8 @@ class Auction:
             )
             raise ValueError(f"snapshot: wrong top-level keys.{detail}")
 
-        scope = snapshot["scope"]
-        if scope is not None and not isinstance(scope, str):
-            raise ValueError(
-                f"snapshot.scope: expected a string or null, got {type(scope).__name__}"
-            )
+        scope = _validate_scope(snapshot["scope"], "snapshot.scope")
+        expect_scope = _validate_scope(expect_scope, "expect_scope")
         if scope != expect_scope:
             raise ValueError(
                 f"snapshot.scope: this snapshot is for {scope!r} and the caller expected "
