@@ -87,6 +87,7 @@ import time
 import urllib.parse
 
 from .auction import (
+    AUCTION_SNAPSHOT_VERSION,
     Auction,
     AuctionPolicy,
     AuctionResult,
@@ -95,6 +96,7 @@ from .auction import (
     MixedBidDenominations,
     PreferredSelection,
     RejectedBid,
+    UnsupportedSnapshotVersion,
 )
 from .capacity import ProviderCapacity, from_provider_status
 from .funding import (
@@ -179,6 +181,7 @@ __all__ = [
     "decode_proxy_payload",
     "is_unverified_success",
     "interpret_success",
+    "AUCTION_SNAPSHOT_VERSION",
     "Auction",
     "AuctionPolicy",
     "AuctionResult",
@@ -186,6 +189,7 @@ __all__ = [
     "BidObservation",
     "MixedBidDenominations",
     "RejectedBid",
+    "UnsupportedSnapshotVersion",
     "RejectedWallet",
     "WalletCandidate",
     "WalletPolicy",
@@ -222,7 +226,7 @@ __all__ = [
     "select_batch",
 ]
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants

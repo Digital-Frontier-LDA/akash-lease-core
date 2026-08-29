@@ -98,6 +98,37 @@ already bid can be selected immediately at the phase transition. Provider
 eligibility is policy input—not hard-coded in this package. Mixed denominations
 fail closed because unlike currencies cannot be compared safely.
 
+### Crash resume
+
+`Auction.snapshot()` returns a plain, JSON-native `dict`; `Auction.restore()`
+rebuilds the auction from it. An adapter that dies mid-window resumes with the
+arrival times it already collected instead of re-dating every surviving bid to
+the restart -- which would hand the fallback rule a pool that all arrived at
+once.
+
+```python
+blob = auction.snapshot(scope="dseq:24680")        # store it however you like
+resumed = Auction.restore(blob, expect_scope="dseq:24680")
+assert resumed.evaluate(now=60) == auction.evaluate(now=60)
+```
+
+It refuses rather than guesses. An unknown schema version raises
+`UnsupportedSnapshotVersion`; a field set that does not match the dataclass, a
+price that is not a string, a duplicate `bid_key` and a `scope` mismatch all
+raise. `observed_at` is relative to `started_at`, so a snapshot whose
+`started_at` is not `0` is refused unless `restore(..., rebase_started_at=...)`
+re-anchors it explicitly: `time.monotonic()`'s reference point is undefined
+across processes, and on Linux it is *coincidentally* meaningful on the same
+host -- which is worse, because it makes a same-host restart test pass. Persist
+a wall-clock anchor of your own beside the blob and compute
+`now = (utcnow() - anchor).total_seconds()` on resume.
+
+`scope` is opaque here and the core never reads it. It exists because `bid_key`
+is unique WITHIN an order and not across the chain, so a snapshot handed back by
+a lookup that was wrong would merge two deployments' bids into one auction --
+which `observe()` cannot detect, since it raises only when a key changes
+provider.
+
 ## Console wallet ranking
 
 `rank_wallets` receives non-secret account snapshots and returns a deterministic

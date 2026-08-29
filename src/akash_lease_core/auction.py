@@ -10,14 +10,33 @@ The contract is intentionally small:
 * then choose the cheapest open preferred bid when one exists,
 * otherwise choose the first observed open eligible fallback bid,
 * never compare prices expressed in different denominations.
+
+CRASH RESUME.  :meth:`Auction.snapshot` and :meth:`Auction.restore` carry the
+whole of an auction's state through a plain ``dict``.  An adapter that dies
+mid-window resumes with the arrival times it already paid for instead of
+restarting the clock -- and, because ``observe`` keeps FIRST arrival, a restart
+that lost them would not merely re-collect, it would re-date every surviving bid
+to the restart and hand the fallback rule a pool that all arrived at once.
+
+This lives HERE and not in a consumer for one reason that is not a preference:
+field completeness is a property of WHERE THE CODE LIVES.  This module can
+enumerate ``dataclasses.fields(BidObservation)``; a consumer cannot, because the
+dataclass is defined in another repository and a field added here is invisible
+there until a customer notices.  :meth:`Auction.observe`'s own comment records
+that defect one layer down -- the hand-written rebuild it replaced *"passed 6 of
+7 fields and lost ``proofs`` to its default of ``()``"*.  A hand-written
+(de)serializer in a consumer is that same defect one layer up, on the path that
+decides which provider gets paid.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field, replace
-from decimal import Decimal
+from collections.abc import Callable, Mapping
+from dataclasses import Field, dataclass, field, fields, replace
+from decimal import Decimal, InvalidOperation
 from enum import Enum
+from typing import Any
 
 from .capacity import ProviderCapacity
 
@@ -159,6 +178,251 @@ class AuctionResult:
     missing_required_proofs: tuple[str, ...] = ()
 
 
+# ── auction snapshot schema ─────────────────────────────────────────────────
+#
+# The schema version of the SNAPSHOT, deliberately distinct from
+# ``AuctionPolicy.version``. The two answer different questions -- "how was this
+# auction decided" versus "how was this auction written down" -- and one string
+# doing both means a serialisation change cannot be shipped without claiming the
+# policy also changed.
+AUCTION_SNAPSHOT_VERSION = "auction-snapshot/v1"
+
+#: Exactly the top-level keys of a snapshot at ``AUCTION_SNAPSHOT_VERSION``.
+_SNAPSHOT_KEYS = frozenset({"version", "scope", "started_at", "policy", "bids"})
+
+
+class UnsupportedSnapshotVersion(ValueError):
+    """Raised when :meth:`Auction.restore` is handed a schema it does not know.
+
+    ⛔ SEPARATE from a plain ``ValueError`` on purpose. "I cannot read this
+    schema" is recoverable by the caller -- start a fresh auction, keep the
+    blob for a later core -- while "this snapshot is malformed" is a defect.
+    Collapsing them would force a consumer to parse an error message to tell a
+    version skew from corruption.
+    """
+
+
+def _encode_identity(value: object) -> object:
+    return value
+
+
+def _encode_float(value: float) -> float:
+    return float(value)
+
+
+def _encode_float_or_none(value: float | None) -> float | None:
+    return None if value is None else float(value)
+
+
+def _encode_decimal(value: Decimal) -> str:
+    # ⛔ str(), never float(). ``float(Decimal("0.1"))`` is a DIFFERENT number,
+    # and this one decides which provider gets paid.
+    return str(value)
+
+
+def _encode_list(value: tuple[str, ...]) -> list[str]:
+    return list(value)
+
+
+def _encode_sorted(value: frozenset[str]) -> list[str]:
+    # sorted(), not list(): a set has no order, so an unsorted dump would make
+    # the same auction produce different bytes on different runs and defeat any
+    # consumer that compares or deduplicates snapshots.
+    return sorted(value)
+
+
+def _encode_sorted_or_none(value: frozenset[str] | None) -> list[str] | None:
+    return None if value is None else sorted(value)
+
+
+def _encode_enum(value: Enum) -> object:
+    return value.value
+
+
+def _encode_capacity(value: ProviderCapacity | None) -> dict[str, object] | None:
+    # ⛔ ``None`` capacity stays ``None``; it does NOT become an all-zero
+    # ProviderCapacity and a readable dimension does NOT become 0.0. This
+    # module's whole thesis is that None never means "full" and never means
+    # "empty" -- see ProviderCapacity's own docstring. A serializer that emitted
+    # 0.0 for an unmeasured dimension would make an unreadable provider sort
+    # last on evidence nobody ever collected.
+    return None if value is None else _encode_dataclass(value)
+
+
+def _decode_str(value: object, where: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
+    return value
+
+
+def _decode_float(value: object, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{where}: expected a number, got {type(value).__name__}")
+    if not math.isfinite(value):
+        raise ValueError(f"{where}: expected a finite number, got {value!r}")
+    return float(value)
+
+
+def _decode_float_or_none(value: object, where: str) -> float | None:
+    return None if value is None else _decode_float(value, where)
+
+
+def _decode_int_or_none(value: object, where: str) -> int | None:
+    if value is None:
+        return None
+    # A bool is an int in Python; a ``true`` in the blob would silently mean 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{where}: expected an integer or null, got {type(value).__name__}")
+    return value
+
+
+def _decode_decimal(value: object, where: str) -> Decimal:
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{where}: expected a decimal STRING, got {type(value).__name__} -- a JSON "
+            "number has already lost the value it was asked to carry"
+        )
+    try:
+        return Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"{where}: {value!r} is not a decimal number") from exc
+
+
+def _decode_str_list(value: object, where: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"{where}: expected a list, got {type(value).__name__}")
+    for index, item in enumerate(value):
+        if not isinstance(item, str):
+            raise ValueError(f"{where}[{index}]: expected a string, got {type(item).__name__}")
+    return value
+
+
+def _decode_str_tuple(value: object, where: str) -> tuple[str, ...]:
+    return tuple(_decode_str_list(value, where))
+
+
+def _decode_str_frozenset(value: object, where: str) -> frozenset[str]:
+    return frozenset(_decode_str_list(value, where))
+
+
+def _decode_str_frozenset_or_none(value: object, where: str) -> frozenset[str] | None:
+    # ⛔ ``None`` is NOT the empty set here. ``eligible_providers=None`` means NO
+    # RESTRICTION; ``frozenset()`` is a policy under which every bid is rejected
+    # ``provider_not_eligible``. Coercing one into the other on the way back in
+    # would turn "everyone may bid" into "nobody may" across a restart.
+    return None if value is None else _decode_str_frozenset(value, where)
+
+
+def _decode_capacity(value: object, where: str) -> ProviderCapacity | None:
+    if value is None:
+        return None
+    return ProviderCapacity(**_decode_dataclass(ProviderCapacity, value, where))
+
+
+def _decode_preferred_selection(value: object, where: str) -> PreferredSelection:
+    text = _decode_str(value, where)
+    try:
+        return PreferredSelection(text)
+    except ValueError as exc:
+        known = ", ".join(sorted(item.value for item in PreferredSelection))
+        raise ValueError(f"{where}: unknown selection {text!r}; known: {known}") from exc
+
+
+_Encode = Callable[[Any], object]
+_Decode = Callable[[Any, str], object]
+
+# ⭐ ONE table, keyed by the field's own ANNOTATION, driving BOTH directions.
+#
+# The alternative is a hand-written field list per dataclass, which is exactly
+# the shape ``observe``'s comment records losing ``proofs``. Here a field added
+# to BidObservation, AuctionPolicy or ProviderCapacity whose type is already in
+# this table is carried automatically, and a field of a type that is NOT in it
+# raises at snapshot time (see ``_codec_for``) instead of being dropped.
+_CODECS: dict[str, tuple[_Encode, _Decode]] = {
+    "str": (_encode_identity, _decode_str),
+    "float": (_encode_float, _decode_float),
+    "float | None": (_encode_float_or_none, _decode_float_or_none),
+    "int | None": (_encode_identity, _decode_int_or_none),
+    "Decimal": (_encode_decimal, _decode_decimal),
+    "tuple[str, ...]": (_encode_list, _decode_str_tuple),
+    "frozenset[str]": (_encode_sorted, _decode_str_frozenset),
+    "frozenset[str] | None": (_encode_sorted_or_none, _decode_str_frozenset_or_none),
+    "ProviderCapacity | None": (_encode_capacity, _decode_capacity),
+    "PreferredSelection": (_encode_enum, _decode_preferred_selection),
+}
+
+
+def _validate_scope(value: object, where: str) -> str | None:
+    """A scope is an identity, or it is absent. The empty string is neither.
+
+    ⛔ REFUSED AT BOTH ENDS, and that symmetry is the point. If ``snapshot``
+    refused ``""`` while ``restore`` accepted it, the identity check would still
+    be satisfiable by a value that identifies nothing: a hand-written blob
+    carrying ``""`` and a caller passing ``expect_scope=""`` compare EQUAL, so
+    the refusal never fires and two orders merge exactly as if no scope had ever
+    been set. ``None`` is how "this snapshot has no scope" is said.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{where}: expected a non-empty string or None, got {type(value).__name__}"
+        )
+    if not value:
+        raise ValueError(
+            f"{where}: expected a non-empty string or None -- the empty string "
+            "identifies nothing, and None is how a snapshot says it has no scope"
+        )
+    return value
+
+
+def _codec_for(owner: type, spec: Field) -> tuple[_Encode, _Decode]:
+    """The (encode, decode) pair for one dataclass field, or a loud refusal."""
+
+    annotation = " ".join(str(spec.type).split())
+    codec = _CODECS.get(annotation)
+    if codec is None:
+        raise TypeError(
+            f"{owner.__name__}.{spec.name}: the auction snapshot schema has no codec for "
+            f"the annotation {annotation!r}. Add one to _CODECS and bump "
+            f"AUCTION_SNAPSHOT_VERSION -- a field this schema cannot write is a bid this "
+            f"auction loses on the next restart, silently."
+        )
+    return codec
+
+
+def _encode_dataclass(instance: Any) -> dict[str, object]:
+    owner = type(instance)
+    return {
+        spec.name: _codec_for(owner, spec)[0](getattr(instance, spec.name))
+        for spec in fields(instance)
+    }
+
+
+def _decode_dataclass(cls: Any, payload: object, where: str) -> dict[str, object]:
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{where}: expected a mapping, got {type(payload).__name__}")
+    expected = {spec.name for spec in fields(cls)}
+    present = set(payload)
+    missing = sorted(expected - present)
+    unknown = sorted(present - expected)
+    if missing or unknown:
+        detail = "".join(
+            (
+                f" missing {missing}." if missing else "",
+                f" unknown {unknown}." if unknown else "",
+            )
+        )
+        raise ValueError(
+            f"{where}: does not match {cls.__name__} at schema {AUCTION_SNAPSHOT_VERSION}.{detail}"
+        )
+    return {
+        spec.name: _codec_for(cls, spec)[1](payload[spec.name], f"{where}.{spec.name}")
+        for spec in fields(cls)
+    }
+
+
 class Auction:
     """Accumulate normalized bid state and make one deadline-bound decision."""
 
@@ -222,6 +486,168 @@ class Auction:
 
         for observation in observations:
             self.observe(observation)
+
+    def snapshot(self, *, scope: str | None = None) -> dict[str, object]:
+        """Return this auction's whole state as a plain, JSON-native ``dict``.
+
+        ⭐ A plain dict, and NOT a JSON string. The caller decides serialisation
+        -- exactly as ``build_proxy_connect_message`` already does -- because a
+        consumer that stores this in a JSONB column, a msgpack blob or a row per
+        bid should not have to parse a string this module produced. This module
+        therefore imports no ``json``, and a test asserts it.
+
+        ⛔ ``observed_at`` IS RELATIVE TO ``started_at``, AND THAT IS THE WHOLE
+        CLOCK CONTRACT. CPython documents ``time.monotonic``'s reference point as
+        undefined -- *"only the difference between the results of two calls is
+        valid"* -- so a raw reading means nothing in a new process. On Linux it is
+        *coincidentally* meaningful on the same host, which is worse than
+        meaningless, because it makes a same-host restart test PASS and a
+        container reschedule produce nonsense. Build the auction with
+        ``started_at=0``, supply ``observed_at`` as elapsed seconds since the
+        auction began, and persist a WALL-CLOCK anchor of your own beside this
+        dict; on resume compute ``now = (utcnow() - anchor).total_seconds()``.
+        :meth:`restore` refuses a snapshot that did not follow this rule.
+
+        ⚠ ``scope`` NAMES THE ORDER THIS AUCTION IS FOR, and this module never
+        reads it. ``bid_key`` is unique WITHIN an order and NOT across the chain:
+        a consumer measured ten live rows of ``bids/list`` collapsing to four
+        keys across seven deployments, because ``provider/gseq/oseq/bseq`` names
+        a different bid in every deployment that has one. One ``Auction`` is one
+        order, so the keys are unambiguous HERE -- but a snapshot is a thing that
+        outlives the process, gets stored next to its siblings and gets handed
+        back by a lookup that can be wrong. Passing the order's identity (a
+        ``dseq``, say) makes :meth:`restore` able to REFUSE the wrong one instead
+        of merging two deployments' bids into one auction, which ``observe``
+        cannot detect: it raises only when a key changes PROVIDER.
+
+        :param scope: opaque caller-owned identity of the order this auction is
+            for. If set, :meth:`restore` REQUIRES a matching ``expect_scope``.
+        """
+
+        scope = _validate_scope(scope, "scope")
+        return {
+            "version": AUCTION_SNAPSHOT_VERSION,
+            "scope": scope,
+            "started_at": float(self.started_at),
+            "policy": _encode_dataclass(self.policy),
+            # Insertion order, so ``restore(snapshot(a)).snapshot()`` is the same
+            # dict and not merely an equivalent one. ``evaluate`` sorts its own
+            # candidates, so order does not change any verdict -- it only makes
+            # the artifact comparable byte for byte.
+            "bids": [_encode_dataclass(item) for item in self._latest_by_key.values()],
+        }
+
+    @classmethod
+    def restore(
+        cls,
+        snapshot: Mapping[str, object],
+        *,
+        expect_scope: str | None = None,
+        rebase_started_at: float | None = None,
+    ) -> Auction:
+        """Rebuild an ``Auction`` from :meth:`snapshot`, or refuse to.
+
+        Everything below is a REFUSAL, not a fallback. A resumed auction decides
+        which provider gets paid; a best-effort parse of a blob this module does
+        not understand is the one outcome worse than not resuming at all.
+
+        * **An unknown schema version raises** :class:`UnsupportedSnapshotVersion`
+          -- the same discipline ``parse_result_exit_code(strict=True)`` applies
+          to a frame it cannot read.
+        * **A field set that does not match the dataclass raises**, naming what
+          is missing and what is unknown. The sets come from
+          ``dataclasses.fields``, so adding a field to ``BidObservation`` here
+          fails the suite instead of arriving as its default in a consumer.
+        * **A price that is not a string raises.** ``float`` is not a lossless
+          carrier for ``Decimal`` and never was.
+        * **A ``started_at`` that is not 0 raises** unless ``rebase_started_at``
+          is given explicitly -- see :meth:`snapshot` for why a raw monotonic
+          reading is not a time.
+        * **A duplicate ``bid_key`` raises.** Two rows under one key is a blob
+          two auctions were written into; ``observe`` would silently keep one.
+        * **A ``scope`` mismatch raises**, in both directions: a snapshot that
+          names its order restored by a caller that does not say which order it
+          expects is refused just as loudly as a disagreement. An EMPTY scope is
+          refused on both sides too -- it would satisfy the check while
+          identifying nothing.
+
+        :param expect_scope: the order identity the caller believes it is
+            resuming. Must equal the snapshot's ``scope``; ``None`` matches only
+            a snapshot that carries no scope, and ``""`` is refused outright.
+        :param rebase_started_at: re-anchor the timeline. Every ``observed_at``
+            shifts by the same delta, so relative arrival is preserved exactly.
+        """
+
+        if not isinstance(snapshot, Mapping):
+            raise ValueError(f"snapshot: expected a mapping, got {type(snapshot).__name__}")
+
+        version = snapshot.get("version")
+        if version != AUCTION_SNAPSHOT_VERSION:
+            raise UnsupportedSnapshotVersion(
+                f"snapshot.version: cannot read {version!r}; this core writes and reads "
+                f"{AUCTION_SNAPSHOT_VERSION!r} only"
+            )
+
+        present = set(snapshot)
+        missing = sorted(_SNAPSHOT_KEYS - present)
+        unknown = sorted(present - _SNAPSHOT_KEYS)
+        if missing or unknown:
+            detail = "".join(
+                (
+                    f" missing {missing}." if missing else "",
+                    f" unknown {unknown}." if unknown else "",
+                )
+            )
+            raise ValueError(f"snapshot: wrong top-level keys.{detail}")
+
+        scope = _validate_scope(snapshot["scope"], "snapshot.scope")
+        expect_scope = _validate_scope(expect_scope, "expect_scope")
+        if scope != expect_scope:
+            raise ValueError(
+                f"snapshot.scope: this snapshot is for {scope!r} and the caller expected "
+                f"{expect_scope!r}. bid_key is unique within ONE order, so restoring "
+                "another order's snapshot merges two deployments' bids into one auction "
+                "and observe() cannot see it."
+            )
+
+        started_at = _decode_float(snapshot["started_at"], "snapshot.started_at")
+        if rebase_started_at is None:
+            if started_at != 0:
+                raise ValueError(
+                    f"snapshot.started_at: expected 0, got {started_at!r}. A snapshot whose "
+                    "clock is not relative holds raw monotonic readings, whose reference "
+                    "point CPython leaves undefined across processes. Pass "
+                    "rebase_started_at= to re-anchor it deliberately."
+                )
+            delta = 0.0
+            new_started_at = 0.0
+        else:
+            new_started_at = _decode_float(rebase_started_at, "rebase_started_at")
+            delta = new_started_at - started_at
+
+        policy = AuctionPolicy(**_decode_dataclass(AuctionPolicy, snapshot["policy"], "policy"))
+
+        raw_bids = snapshot["bids"]
+        if not isinstance(raw_bids, list):
+            raise ValueError(f"snapshot.bids: expected a list, got {type(raw_bids).__name__}")
+        observations: dict[str, BidObservation] = {}
+        for index, raw in enumerate(raw_bids):
+            where = f"bids[{index}]"
+            values = _decode_dataclass(BidObservation, raw, where)
+            if delta:
+                values["observed_at"] = values["observed_at"] + delta  # type: ignore[operator]
+            observation = BidObservation(**values)  # type: ignore[arg-type]
+            if observation.bid_key in observations:
+                raise ValueError(
+                    f"{where}: duplicate bid_key {observation.bid_key!r}. An Auction holds one "
+                    "observation per key; two here means two auctions were written into one "
+                    "snapshot, and keeping either silently would lose a real bid."
+                )
+            observations[observation.bid_key] = observation
+
+        auction = cls(policy, started_at=new_started_at)
+        auction._latest_by_key = observations
+        return auction
 
     def evaluate(
         self,
