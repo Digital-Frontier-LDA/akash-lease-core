@@ -28,6 +28,47 @@ interpret_success(0, "TOKEN\n", marker="TOKEN")   # True  — verified
 interpret_success(0, "", require_stdout=True)     # False — expected output, got none
 ```
 
+## The standard this implements
+
+This library decides things the **Akash runner standard** mandates — provider qualification,
+the auction, funding. It does not define that standard, and there is no copy of it here on
+purpose: a third copy is the failure centralising the code was meant to remove.
+
+| document | normative for |
+|---|---|
+| **df-wiki** `content/platform/akash-github-runners.md` | the mandates **§1–§11** — the only doc with `## N` sections |
+| **df-cicd** `standards/AKASH-RUNNER-CI.md` | the **CI contract** and workflow template |
+| **akash-github-runner** `akash_runner/check_*.py` | the **rules that enforce** both |
+
+⇒ For a §-numbered mandate, read **df-wiki**. For the CI contract, read **df-cicd**.
+
+### Consumer versions — measured 2026-08-31
+
+Adoption of the *code* is complete: across just-akash (18 importers), Blazing-Back (14) and
+akash-github-runner (3) there are **zero local re-definitions** of `qualified_set`,
+`evaluate_provider`, `from_provider_status` or `PreferredSelection`. Nobody has forked the
+logic.
+
+The *version* is one release behind in both consumers:
+
+```
+akash-lease-core main   0.10.0
+Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
+                        v0.9.0   control-plane/workers/requirements.txt:73
+just-akash              v0.9.0   uv.lock (resolved)
+```
+
+⚠ **Count only what INSTALLS.** A grep for this package across Blazing-Back also returns
+`0.7.0`, `0.8.0` and `0.2.0` — every one of them in a comment, a planning document, or a test
+docstring discussing older behaviour. #33 read those as live pins and reported a three-version
+range inside one consumer; the resolved skew is a single version. A naive grep counts prose as
+configuration, and here it inflated the finding by two versions.
+
+⛔ **This is a record, not a plan to bump.** Whether `0.9.0 → 0.10.0` contains behaviour
+changes that matter has not been determined. Upgrading consumers onto a version nobody has
+diffed is how a shared library becomes an incident — establish the intended pin contract
+(#32) first.
+
 ## Design: sans-I/O
 
 The protocol is a pure function of bytes; **each consumer supplies its own I/O adapter** — a blocking transport for a CLI, an async one for a service. That is what lets one implementation serve both without a shared event-loop assumption. See [sans-io.readthedocs.io](https://sans-io.readthedocs.io/).
