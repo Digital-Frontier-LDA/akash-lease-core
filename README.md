@@ -51,7 +51,7 @@ logic.
 
 The *version* is one release behind in both consumers:
 
-```
+```text
 akash-lease-core main   0.10.0
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
