@@ -99,6 +99,7 @@ from .auction import (
     UnsupportedSnapshotVersion,
 )
 from .capacity import ProviderCapacity, from_provider_status
+from .chain_identity import DeploymentKey, is_canonical_akash_dseq, is_canonical_akash_owner
 from .funding import (
     DEPOSIT_UACT,
     AllowanceQuantity,
@@ -165,6 +166,9 @@ from .workload_identity import (
 )
 
 __all__ = [
+    "DeploymentKey",
+    "is_canonical_akash_dseq",
+    "is_canonical_akash_owner",
     "Outcome",
     "ProviderObservation",
     "QualificationPolicy",
@@ -250,7 +254,7 @@ __all__ = [
     "select_batch",
 ]
 
-__version__ = "0.11.0"
+__version__ = "0.11.1"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
