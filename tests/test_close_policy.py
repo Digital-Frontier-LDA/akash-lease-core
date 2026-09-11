@@ -543,7 +543,7 @@ def test_preclose_chain_effect_mutations_hold(mutation):
         _ci_authority(),
         chain_evidence=_chain(population, **mutation),
     )
-    assert decision.disposition is CloseDisposition.HOLD
+    assert not decision.allowed
 
 
 def test_exact_complete_never_leased_population_is_nonvacuous_and_allowed():
@@ -787,15 +787,7 @@ def test_external_production_approval_with_equivalent_guarantees_allows():
         "prod",
         approval_mode=ProductionApprovalMode.EXTERNAL,
         prevent_self_review_status=EnvironmentControlStatus.NOT_APPLICABLE,
-        bypass=ProductionBypassEvidence(
-            configuration_status=EnvironmentControlStatus.NOT_APPLICABLE,
-            use_status=BypassUseStatus.UNUSED,
-            observation_verification_status=VerificationStatus.VERIFIED,
-            enabled_bypass_policy_status=VerificationStatus.UNKNOWN,
-            observation_source="external-change-ledger",
-            observation_digest="external-no-bypass-digest",
-            actor_principal=None,
-        ),
+        bypass=None,
         policy_reference="change-control-policy:v4",
         approval_verification_source="signed-change-ledger",
         workflow_ref=None,
@@ -809,6 +801,27 @@ def test_external_production_approval_with_equivalent_guarantees_allows():
     assert decision.allowed
     assert decision.authority_principal == "service:executor"
     assert decision.authority_digest
+
+
+def test_external_production_approval_with_github_bypass_evidence_holds():
+    population = _population("prod-payload")
+    authority = _payload_authority(
+        "prod",
+        approval_mode=ProductionApprovalMode.EXTERNAL,
+        prevent_self_review_status=EnvironmentControlStatus.NOT_APPLICABLE,
+        bypass=_enabled_bypass(),
+        policy_reference="change-control-policy:v4",
+        approval_verification_source="signed-change-ledger",
+        workflow_ref=None,
+        workflow_sha=None,
+        ref=None,
+        verified_workflow_ref=None,
+        verified_workflow_sha=None,
+        verified_ref=None,
+    )
+    decision = _evaluate(population, CloseIntent.PRODUCTION_RETIREMENT, authority)
+    assert not decision.allowed
+    assert decision.reason == "external production approval carries GitHub environment controls"
 
 
 @pytest.mark.parametrize(

@@ -250,7 +250,7 @@ class ProductionRetirementAuthority:
     single_use_verification: VerificationStatus
     authorization_uniqueness_status: UniquenessStatus
     prevent_self_review_status: EnvironmentControlStatus
-    bypass: ProductionBypassEvidence
+    bypass: ProductionBypassEvidence | None
     policy_reference: str
     approval_verification_source: str
     approval_verification_digest: str
@@ -834,9 +834,9 @@ def _authority_reason(
             authority.observed_at, evaluated_at, authority.valid_until
         ):
             return "production authorization is not valid at evaluation time"
-        if not isinstance(authority.bypass, ProductionBypassEvidence):
-            return "production bypass evidence is untyped"
         if authority.approval_mode is ProductionApprovalMode.GITHUB_ENVIRONMENT:
+            if not isinstance(authority.bypass, ProductionBypassEvidence):
+                return "GitHub environment bypass evidence is missing or untyped"
             if authority.prevent_self_review_status not in {
                 EnvironmentControlStatus.VERIFIED_ENABLED,
                 EnvironmentControlStatus.VERIFIED_DISABLED,
@@ -901,10 +901,7 @@ def _authority_reason(
         elif authority.approval_mode is ProductionApprovalMode.EXTERNAL:
             if (
                 authority.prevent_self_review_status is not EnvironmentControlStatus.NOT_APPLICABLE
-                or authority.bypass.configuration_status
-                is not EnvironmentControlStatus.NOT_APPLICABLE
-                or authority.bypass.use_status is not BypassUseStatus.UNUSED
-                or authority.bypass.actor_principal is not None
+                or authority.bypass is not None
             ):
                 return "external production approval carries GitHub environment controls"
             if any(

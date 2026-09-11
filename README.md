@@ -264,8 +264,9 @@ accepted for a human-originated request or a distinct authenticated requester.
 Enabled admin bypass requires an explicit policy and non-admin automation. If
 bypass was used, a source-bound event must identify the authorized human
 approver; unknown or automated actors deny. The authority also binds the
-approved workflow commit and ref. External approval sources can provide
-equivalent separation, uniqueness, and verification guarantees. A generic
+approved workflow commit and ref. External approval sources carry no GitHub
+environment bypass evidence and must provide equivalent separation,
+uniqueness, and verification guarantees. A generic
 `force` input does not exist. Unknown, incomplete, malformed, or mixed group
 populations are held.
 Every decision receives a deterministic `evaluated_at` value and checks it
