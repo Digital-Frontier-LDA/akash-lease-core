@@ -449,12 +449,16 @@ on-chain identity schema can add an ordinal without silently changing the
 established `idv1` wire format.
 
 This contract authorizes an attempted close; it does not claim the outcome.
-Post-close policy remains a separate cohesive contract because execution
-closure and settlement are independent: deployment/groups/leases may be
-terminal while escrow is `overdrawn_unsettled`. A later core slice must model
-execution closure separately from `settled`, `overdrawn_unsettled`, and
-`unknown` settlement evidence rather than require escrow closure to call a
-workload closed.
+`ExecutionClosure` records the separate post-close proof. Both observations
+must name distinct endpoints, operators, and trust paths whose operational
+independence the adapter verified. They must identify one chain and one exact
+finalized height at or after the close transaction height. The core also keeps
+execution closure separate from `settled`, `overdrawn_unsettled`, and `unknown`
+settlement evidence: deployment/groups/leases may be terminal while escrow is
+still unsettled. Adapters remain responsible for authenticating the recorded
+operator identities, determining finality, and obtaining complete populations;
+the sans-I/O contract refuses to persist an untyped or internally inconsistent
+claim as `execution_closed`.
 
 ## Reconciled semantics
 

@@ -100,6 +100,12 @@ class SettlementState(str, Enum):
     SETTLED = "settled"
 
 
+class ExecutionClosureProofMode(str, Enum):
+    """Finality mode admitted for a durable post-close observation bundle."""
+
+    EXACT_FINALIZED_HEIGHT = "exact_finalized_height"
+
+
 class TransitionError(ValueError):
     """Raised when an entry would rewrite or skip journal history."""
 
@@ -647,10 +653,29 @@ class CreatorRollbackRequest:
 
 @dataclass(frozen=True)
 class ExecutionClosure:
+    """Complete terminal populations observed through two finalized trust paths.
+
+    The adapter authenticates operator identities, establishes that the trust
+    paths are not aliases, and determines the close transaction and finalized
+    block heights. This sans-I/O boundary rejects a closure claim unless those
+    decisions are explicit and internally consistent.
+    """
+
     operation_id: str
     subject: DeploymentKey
+    chain_id: str
+    proof_mode: ExecutionClosureProofMode
     source_a: str
     source_b: str
+    operator_identity_a: str
+    operator_identity_b: str
+    trust_path_a: str
+    trust_path_b: str
+    operator_independence_verified: bool
+    source_a_height: int
+    source_b_height: int
+    common_finality_height: int
+    close_transaction_height: int
     group_population_digest: str
     lease_population_digest: str
     evidence_digest: str
@@ -660,10 +685,40 @@ class ExecutionClosure:
         _operation(self.operation_id)
         if not isinstance(self.subject, DeploymentKey):
             raise ValueError("execution closure requires an exact subject")
-        _nonempty(self.source_a, "source_a")
-        _nonempty(self.source_b, "source_b")
-        if self.source_a == self.source_b:
-            raise ValueError("execution closure requires two independent sources")
+        _nonempty(self.chain_id, "chain_id")
+        if not isinstance(self.proof_mode, ExecutionClosureProofMode):
+            raise ValueError("execution closure requires a typed proof mode")
+        for field_name in (
+            "source_a",
+            "source_b",
+            "operator_identity_a",
+            "operator_identity_b",
+            "trust_path_a",
+            "trust_path_b",
+        ):
+            _nonempty(getattr(self, field_name), field_name)
+        if (
+            self.source_a == self.source_b
+            or self.operator_identity_a == self.operator_identity_b
+            or self.trust_path_a == self.trust_path_b
+            or self.operator_independence_verified is not True
+        ):
+            raise ValueError("execution closure requires two independently operated trust paths")
+        for field_name in (
+            "source_a_height",
+            "source_b_height",
+            "common_finality_height",
+            "close_transaction_height",
+        ):
+            value = getattr(self, field_name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{field_name} must be a positive integer")
+        if self.proof_mode is not ExecutionClosureProofMode.EXACT_FINALIZED_HEIGHT or not (
+            self.source_a_height == self.source_b_height == self.common_finality_height
+        ):
+            raise ValueError("execution closure requires two reads at one exact finalized height")
+        if self.common_finality_height < self.close_transaction_height:
+            raise ValueError("execution closure observations must be at or after the close height")
         _digest(self.group_population_digest, "group_population_digest")
         _digest(self.lease_population_digest, "lease_population_digest")
         _digest(self.evidence_digest, "evidence_digest")
@@ -1020,6 +1075,7 @@ __all__ = [
     "CreatorRollbackRequest",
     "ExactChainReadEvidence",
     "ExecutionClosure",
+    "ExecutionClosureProofMode",
     "HandoffFailure",
     "JournalEntry",
     "JournalState",
