@@ -115,6 +115,36 @@ class CreationBindingMode(str, Enum):
     UNKNOWN = "unknown"
 
 
+@dataclass(frozen=True)
+class AuthorityValidation:
+    """Typed result for lifecycle-authority validation."""
+
+    reason: str
+    evidence_gap: bool = False
+
+
+_EVIDENCE_GAP_REASONS = {
+    "lifecycle authority lacks source-bound observation evidence",
+    "lifecycle authority is not valid at evaluation time",
+    "production principal authentication is missing or unverified",
+    "production approver role is unverified",
+    "production executor non-admin role evidence is unverified",
+    "GitHub environment bypass evidence is missing or untyped",
+    "GitHub environment bypass evidence is missing",
+    "GitHub environment bypass observation is unverified",
+    "GitHub environment self-review policy is unverified",
+    "GitHub environment admin bypass policy is unverified",
+    "enabled GitHub admin bypass lacks explicit policy authorization",
+    "automated requester admin status is unverified",
+    "GitHub admin bypass use is unknown",
+    "GitHub admin bypass actor is unknown",
+}
+
+
+def _authority_failure(reason: str) -> AuthorityValidation:
+    return AuthorityValidation(reason, reason in _EVIDENCE_GAP_REASONS)
+
+
 class HandoffState(str, Enum):
     FAILED = "failed"
     SUCCEEDED = "succeeded"
@@ -720,9 +750,9 @@ def _isolated_reason(
 
 def _authority_reason(
     authority: LifecycleAuthority, subject: DeploymentKey, evaluated_at: int
-) -> str | None:
+) -> AuthorityValidation | None:
     if authority.subject != subject:
-        return "authority is bound to another deployment"
+        return _authority_failure("authority is bound to another deployment")
     if isinstance(authority, CreatorRollbackAuthority):
         if not _nonempty(
             authority.operation_id,
@@ -731,7 +761,7 @@ def _authority_reason(
             authority.backend,
             authority.capability_reference,
         ):
-            return "creator capability lacks operation or backend provenance"
+            return _authority_failure("creator capability lacks operation or backend provenance")
         if (
             authority.binding_status is not CreationBindingStatus.CONFIRMED
             or authority.binding_mode
@@ -741,20 +771,22 @@ def _authority_reason(
             }
             or not _nonempty(authority.binding_source, authority.binding_evidence_digest)
         ):
-            return "creator capability lacks positive same-operation creation binding"
+            return _authority_failure(
+                "creator capability lacks positive same-operation creation binding"
+            )
         if not _window(authority.prepared_at, evaluated_at, authority.valid_until):
-            return "creator capability is not valid at evaluation time"
+            return _authority_failure("creator capability is not valid at evaluation time")
         trigger = authority.rollback_trigger
         if not isinstance(trigger, RollbackTriggerEvidence):
-            return "creator rollback trigger is untyped"
+            return _authority_failure("creator rollback trigger is untyped")
         if trigger.handoff_state is not HandoffState.FAILED:
-            return "creator rollback requires a failed handoff"
+            return _authority_failure("creator rollback requires a failed handoff")
         if not _nonempty(trigger.source, trigger.evidence_digest):
-            return "creator rollback trigger lacks source-bound evidence"
+            return _authority_failure("creator rollback trigger lacks source-bound evidence")
         if trigger.observed_at < authority.prepared_at or not _window(
             trigger.observed_at, evaluated_at, trigger.valid_until
         ):
-            return "creator rollback trigger is not valid at evaluation time"
+            return _authority_failure("creator rollback trigger is not valid at evaluation time")
         return None
     if isinstance(authority, ProductionRetirementAuthority):
         if not _nonempty(
@@ -772,44 +804,48 @@ def _authority_reason(
             authority.single_use_authorization_id,
             authority.unique_authorization_id,
         ):
-            return "production authority lacks identity or verification evidence"
+            return _authority_failure(
+                "production authority lacks identity or verification evidence"
+            )
         principals = (authority.requester, authority.approver, authority.executor)
         if any(not isinstance(item, ProductionPrincipal) for item in principals):
-            return "production authority has untyped principals"
+            return _authority_failure("production authority has untyped principals")
         if any(
             not _nonempty(item.principal, item.evidence_source, item.evidence_digest)
             or item.authentication_status is not VerificationStatus.VERIFIED
             for item in principals
         ):
-            return "production principal authentication is missing or unverified"
+            return _authority_failure(
+                "production principal authentication is missing or unverified"
+            )
         if authority.approver.kind is not PrincipalKind.HUMAN:
-            return "production approver is not an authenticated human"
+            return _authority_failure("production approver is not an authenticated human")
         if authority.approver.approval_role_membership is MembershipStatus.UNKNOWN:
-            return "production approver role is unverified"
+            return _authority_failure("production approver role is unverified")
         if authority.approver.approval_role_membership is not MembershipStatus.VERIFIED_MEMBER:
-            return "production human lacks the approval role"
+            return _authority_failure("production human lacks the approval role")
         if authority.executor.kind is not PrincipalKind.MACHINE:
-            return "production executor must be a machine principal"
+            return _authority_failure("production executor must be a machine principal")
         if authority.executor.principal == authority.approver.principal:
-            return "production executor is the approving principal"
+            return _authority_failure("production executor is the approving principal")
         if (
             authority.executor.admin_membership is MembershipStatus.VERIFIED_MEMBER
             or authority.executor.approval_role_membership is MembershipStatus.VERIFIED_MEMBER
         ):
-            return "production executor is an admin or approver"
+            return _authority_failure("production executor is an admin or approver")
         if (
             authority.executor.admin_membership is not MembershipStatus.VERIFIED_NON_MEMBER
             or authority.executor.approval_role_membership
             is not MembershipStatus.VERIFIED_NON_MEMBER
         ):
-            return "production executor non-admin role evidence is unverified"
+            return _authority_failure("production executor non-admin role evidence is unverified")
         if (
             authority.requester.kind is PrincipalKind.MACHINE
             and authority.requester.principal == authority.approver.principal
         ):
-            return "automated production requester cannot be its approver"
+            return _authority_failure("automated production requester cannot be its approver")
         if authority.action is not ProductionAuthorizationAction.PRODUCTION_RETIREMENT:
-            return "production authority action disagrees"
+            return _authority_failure("production authority action disagrees")
         if (
             authority.verified_authorization_id != authority.authorization_id
             or authority.verified_environment != authority.environment
@@ -817,93 +853,117 @@ def _authority_reason(
             or authority.verified_subject != authority.subject
             or authority.verified_action != authority.action
         ):
-            return "production approval verification is bound to another action"
+            return _authority_failure(
+                "production approval verification is bound to another action"
+            )
         if authority.approval_verification_status is not VerificationStatus.VERIFIED:
-            return "production approval is unverified"
+            return _authority_failure("production approval is unverified")
         if authority.single_use_verification is not VerificationStatus.VERIFIED:
-            return "production single-use policy is unverified"
+            return _authority_failure("production single-use policy is unverified")
         if authority.single_use_authorization_id != authority.authorization_id:
-            return "production single-use proof is bound to another authorization"
+            return _authority_failure(
+                "production single-use proof is bound to another authorization"
+            )
         if authority.authorization_uniqueness_status is not UniquenessStatus.UNIQUE:
-            return "production authorization is reused or unverified"
+            return _authority_failure("production authorization is reused or unverified")
         if authority.unique_authorization_id != authority.authorization_id:
-            return "production uniqueness proof is bound to another authorization"
+            return _authority_failure(
+                "production uniqueness proof is bound to another authorization"
+            )
         if type(authority.issued_at) is not int or authority.issued_at <= 0:
-            return "production authorization issued-at is invalid"
+            return _authority_failure("production authorization issued-at is invalid")
         if authority.issued_at > authority.observed_at or not _window(
             authority.observed_at, evaluated_at, authority.valid_until
         ):
-            return "production authorization is not valid at evaluation time"
+            return _authority_failure("production authorization is not valid at evaluation time")
         if authority.approval_mode is ProductionApprovalMode.GITHUB_ENVIRONMENT:
             if not isinstance(authority.bypass, ProductionBypassEvidence):
-                return "GitHub environment bypass evidence is missing or untyped"
+                return _authority_failure(
+                    "GitHub environment bypass evidence is missing or untyped"
+                )
             if authority.prevent_self_review_status not in {
                 EnvironmentControlStatus.VERIFIED_ENABLED,
                 EnvironmentControlStatus.VERIFIED_DISABLED,
             }:
-                return "GitHub environment self-review policy is unverified"
+                return _authority_failure("GitHub environment self-review policy is unverified")
             if (
                 authority.prevent_self_review_status is EnvironmentControlStatus.VERIFIED_DISABLED
                 and authority.requester.kind is not PrincipalKind.HUMAN
                 and authority.requester.principal == authority.approver.principal
             ):
-                return "disabled self-review prevention permits automated self-approval"
+                return _authority_failure(
+                    "disabled self-review prevention permits automated self-approval"
+                )
             bypass = authority.bypass
             if not isinstance(bypass, ProductionBypassEvidence) or not _nonempty(
                 bypass.observation_source, bypass.observation_digest
             ):
-                return "GitHub environment bypass evidence is missing"
+                return _authority_failure("GitHub environment bypass evidence is missing")
             if bypass.observation_verification_status is not VerificationStatus.VERIFIED:
-                return "GitHub environment bypass observation is unverified"
+                return _authority_failure("GitHub environment bypass observation is unverified")
             if bypass.configuration_status is EnvironmentControlStatus.UNKNOWN:
-                return "GitHub environment admin bypass policy is unverified"
+                return _authority_failure("GitHub environment admin bypass policy is unverified")
             if bypass.configuration_status is EnvironmentControlStatus.VERIFIED_DISABLED:
                 if bypass.use_status is not BypassUseStatus.UNUSED:
-                    return "disabled GitHub admin bypass has inconsistent use evidence"
+                    return _authority_failure(
+                        "disabled GitHub admin bypass has inconsistent use evidence"
+                    )
             elif bypass.configuration_status is EnvironmentControlStatus.VERIFIED_ENABLED:
                 if bypass.enabled_bypass_policy_status is not VerificationStatus.VERIFIED:
-                    return "enabled GitHub admin bypass lacks explicit policy authorization"
+                    return _authority_failure(
+                        "enabled GitHub admin bypass lacks explicit policy authorization"
+                    )
                 if (
                     authority.requester.kind is PrincipalKind.MACHINE
                     and authority.requester.admin_membership is MembershipStatus.VERIFIED_MEMBER
                 ):
-                    return "automated requester is an admin while bypass is enabled"
+                    return _authority_failure(
+                        "automated requester is an admin while bypass is enabled"
+                    )
                 if (
                     authority.requester.kind is PrincipalKind.MACHINE
                     and authority.requester.admin_membership
                     is not MembershipStatus.VERIFIED_NON_MEMBER
                 ):
-                    return "automated requester admin status is unverified"
+                    return _authority_failure("automated requester admin status is unverified")
                 if bypass.use_status is BypassUseStatus.USED:
                     if not _nonempty(bypass.actor_principal):
-                        return "GitHub admin bypass actor is unknown"
+                        return _authority_failure("GitHub admin bypass actor is unknown")
                     if bypass.actor_principal != authority.approver.principal:
-                        return "GitHub admin bypass actor is not the authorized human"
+                        return _authority_failure(
+                            "GitHub admin bypass actor is not the authorized human"
+                        )
                 elif bypass.use_status is BypassUseStatus.UNUSED:
                     if bypass.actor_principal is not None:
-                        return "unused GitHub admin bypass names an actor"
+                        return _authority_failure("unused GitHub admin bypass names an actor")
                 else:
-                    return "GitHub admin bypass use is unknown"
+                    return _authority_failure("GitHub admin bypass use is unknown")
             else:
-                return "GitHub environment admin bypass policy is unsupported"
+                return _authority_failure("GitHub environment admin bypass policy is unsupported")
             if (
                 not _nonempty(authority.workflow_ref, authority.ref)
                 or not isinstance(authority.workflow_sha, str)
                 or re.fullmatch(r"[0-9a-f]{40}", authority.workflow_sha) is None
             ):
-                return "GitHub production approval lacks workflow and ref binding"
+                return _authority_failure(
+                    "GitHub production approval lacks workflow and ref binding"
+                )
             if (
                 authority.verified_workflow_ref,
                 authority.verified_workflow_sha,
                 authority.verified_ref,
             ) != (authority.workflow_ref, authority.workflow_sha, authority.ref):
-                return "GitHub approval verification is bound to another workflow or ref"
+                return _authority_failure(
+                    "GitHub approval verification is bound to another workflow or ref"
+                )
         elif authority.approval_mode is ProductionApprovalMode.EXTERNAL:
             if (
                 authority.prevent_self_review_status is not EnvironmentControlStatus.NOT_APPLICABLE
                 or authority.bypass is not None
             ):
-                return "external production approval carries GitHub environment controls"
+                return _authority_failure(
+                    "external production approval carries GitHub environment controls"
+                )
             if any(
                 value is not None
                 for value in (
@@ -915,14 +975,16 @@ def _authority_reason(
                     authority.verified_ref,
                 )
             ):
-                return "external production approval carries GitHub-only bindings"
+                return _authority_failure(
+                    "external production approval carries GitHub-only bindings"
+                )
         else:
-            return "production approval mode is unsupported"
+            return _authority_failure("production approval mode is unsupported")
         return None
     if not _nonempty(authority.source, authority.observation_digest):
-        return "lifecycle authority lacks source-bound observation evidence"
+        return _authority_failure("lifecycle authority lacks source-bound observation evidence")
     if not _window(authority.observed_at, evaluated_at, authority.valid_until):
-        return "lifecycle authority is not valid at evaluation time"
+        return _authority_failure("lifecycle authority is not valid at evaluation time")
     return None
 
 
@@ -976,26 +1038,11 @@ def _authorize(
         ),
     ):
         raise ValueError("lifecycle authority must use a typed authority variant")
-    reason = _authority_reason(authority, subject, evaluated_at)
-    if reason:
-        evidence_gap = reason in {
-            "lifecycle authority lacks source-bound observation evidence",
-            "lifecycle authority is not valid at evaluation time",
-            "production principal authentication is missing or unverified",
-            "production approver role is unverified",
-            "production executor non-admin role evidence is unverified",
-            "GitHub environment self-review policy is unverified",
-            "GitHub environment bypass evidence is missing",
-            "GitHub environment bypass observation is unverified",
-            "GitHub environment admin bypass policy is unverified",
-            "enabled GitHub admin bypass lacks explicit policy authorization",
-            "automated requester admin status is unverified",
-            "GitHub admin bypass use is unknown",
-            "GitHub admin bypass actor is unknown",
-        }
+    validation = _authority_reason(authority, subject, evaluated_at)
+    if validation:
         return result(
-            CloseDisposition.HOLD if evidence_gap else CloseDisposition.DENY,
-            reason,
+            CloseDisposition.HOLD if validation.evidence_gap else CloseDisposition.DENY,
+            validation.reason,
         )
     if intent is CloseIntent.CI_CLEANUP:
         if not isinstance(authority, CIAuthority):
@@ -1022,7 +1069,7 @@ def _authorize(
             return result(CloseDisposition.DENY, "staging authority has no reference")
         if (
             attestation
-            and attestation.authorization_reference != authority.authorization_reference
+            and attestation.authorization_reference != candidates.creation_authorization_reference
         ):
             return result(CloseDisposition.DENY, "staging authorities disagree")
     elif intent is CloseIntent.PRODUCTION_RETIREMENT:
