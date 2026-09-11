@@ -381,6 +381,55 @@ def test_lifecycle_ordinal_allocation_and_exact_backend_are_not_reusable():
         _prepared_journal().append(JournalState.SUBMITTED, rotated, recorded_at=NOW + 1)
 
 
+def test_equal_backend_identity_survives_storage_reconstruction():
+    """A durable adapter reconstructs values; equality cannot depend on object identity."""
+
+    reconstructed = replace(MEDIATED_BACKEND)
+    assert reconstructed == MEDIATED_BACKEND
+    assert reconstructed is not MEDIATED_BACKEND
+
+    submitted = _prepared_journal().append(
+        JournalState.SUBMITTED,
+        _submission(backend=reconstructed),
+        recorded_at=NOW + 1,
+    )
+    safe = CreateOutcome(
+        OPERATION,
+        CreateOutcomeKind.FALLBACK_SAFE,
+        OutcomeReasonCode.SUBMISSION_PROVEN_ABSENT,
+        non_commit=NonCommitEvidence(
+            OPERATION,
+            replace(MEDIATED_BACKEND),
+            "submission-123",
+            None,
+            OWNER,
+            GROUP_DIGEST,
+            "submission ledger",
+            "direct chain",
+            "c" * 64,
+            NOW + 2,
+        ),
+    )
+    assert submitted.append(JournalState.FALLBACK_SAFE, safe, recorded_at=NOW + 2)
+
+    rejected = CreateOutcome(
+        OPERATION,
+        CreateOutcomeKind.REJECTED_BEFORE_SEND,
+        OutcomeReasonCode.MEDIATOR_REJECTED,
+        rejection=RejectionEvidence(
+            OPERATION,
+            replace(MEDIATED_BACKEND),
+            True,
+            "mediator",
+            "b" * 64,
+            NOW + 1,
+        ),
+    )
+    assert _prepared_journal().append(
+        JournalState.REJECTED_BEFORE_SEND, rejected, recorded_at=NOW + 1
+    )
+
+
 def test_consumer_cannot_bypass_validation_by_constructing_a_journal_directly():
     skipped = JournalEntry(
         revision=1,

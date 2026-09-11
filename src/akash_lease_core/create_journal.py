@@ -878,7 +878,7 @@ def _validate_entry(entries: tuple[JournalEntry, ...], entry: JournalEntry) -> N
     if entry.recorded_at < previous.recorded_at or entry.recorded_at < prepared.prepared_at:
         raise TransitionError("transition time moved backwards")
     if isinstance(entry.payload, SubmissionEvidence) and (
-        entry.payload.backend is not prepared.owner_candidate.backend
+        entry.payload.backend != prepared.owner_candidate.backend
         or entry.payload.submitted_request_digest != prepared.request_digest
         or entry.payload.submitted_at < prepared.prepared_at
     ):
@@ -888,13 +888,13 @@ def _validate_entry(entries: tuple[JournalEntry, ...], entry: JournalEntry) -> N
         if entry.payload.kind is not expected_kind:
             raise TransitionError("outcome kind disagrees with journal state")
         if entry.payload.rejection is not None and (
-            entry.payload.rejection.backend is not prepared.owner_candidate.backend
+            entry.payload.rejection.backend != prepared.owner_candidate.backend
         ):
             raise TransitionError("rejection backend disagrees with prepared backend")
         if entry.payload.non_commit is not None:
             proof = entry.payload.non_commit
             if (
-                proof.backend is not prepared.owner_candidate.backend
+                proof.backend != prepared.owner_candidate.backend
                 or proof.exact_owner != prepared.owner_candidate.owner
                 or proof.group_population_digest != prepared.group_population_digest
             ):
