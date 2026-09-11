@@ -1,7 +1,8 @@
 # akash-lease-core
 
-Sans-I/O core for Akash **wallet, lease acquisition, and lease-shell semantics**:
-deterministic wallet ranking, a deadline-bound provider auction, frame codec, URL
+Sans-I/O core for Akash **wallet, lease acquisition, workload identity, and
+lease-shell semantics**: deterministic wallet ranking, a deadline-bound
+provider auction, canonical deployment-group identity, frame codec, URL
 builders, and trustworthy exec result interpretation.
 
 No sockets. No event loop. No `ssl`, `websockets`, `requests`, or `httpx`. Stdlib only, **zero runtime dependencies**.
@@ -52,7 +53,7 @@ logic.
 The *version* is one release behind in both consumers:
 
 ```text
-akash-lease-core main   0.10.0
+akash-lease-core main   0.11.0
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -64,7 +65,7 @@ docstring discussing older behaviour. #33 read those as live pins and reported a
 range inside one consumer; the resolved skew is a single version. A naive grep counts prose as
 configuration, and here it inflated the finding by two versions.
 
-⛔ **This is a record, not a plan to bump.** Whether `0.9.0 → 0.10.0` contains behaviour
+⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.11.0` contains behaviour
 changes that matter has not been determined. Upgrading consumers onto a version nobody has
 diffed is how a shared library becomes an incident — establish the intended pin contract
 (#32) first.
@@ -182,6 +183,55 @@ not two. The core therefore folds duplicate accounts before ranking. Consumers m
 route later status/update/destroy operations to the account that owns the DSEQ;
 re-running the richest-wallet rule during cleanup is unsafe because balances can
 change after creation.
+
+## Workload identity
+
+`format_identity`, `parse_identity`, `classify_groups`, and `transform_sdl`
+implement the versioned `idv1` group-name contract shared by Akash producers
+and cleanup readers. Callers supply an explicit prefix-to-repository ownership
+register; the core never infers ownership from live deployments. The SDL
+transformer atomically renames every placement definition and corresponding
+deployment reference, or rejects the whole document.
+
+Every observed group in a deployment must describe one lifecycle, encode its
+actual group number, and form the complete canonical `1..N` population. A
+legacy name, malformed field, duplicate group, mixed class, lifecycle
+disagreement, or unverified population returns a held `Population`. The caller
+must supply typed completeness evidence; held results retain parsed identities
+and population counts for diagnosis. A successful parse is attribution, not
+permission to retire the deployment: current CI run state, expiry, or explicit
+production retirement authority remains a separate input.
+
+```python
+from dataclasses import replace
+
+from akash_lease_core import (
+    GroupObservation,
+    Identity,
+    PopulationCompleteness,
+    classify_groups,
+    format_identity,
+)
+
+owners = {"example": "example-org/example-repo"}
+first = Identity(
+    prefix="example",
+    owner="example-org/example-repo",
+    workload_class="ci-runner",
+    group=1,
+    run=12345,
+    attempt=2,
+)
+second = replace(first, group=2)
+names = [format_identity(item, owners) for item in (first, second)]
+observations = [GroupObservation(group, name) for group, name in enumerate(names, start=1)]
+
+assert classify_groups(
+    observations,
+    owners,
+    completeness=PopulationCompleteness.COMPLETE,
+).held is False
+```
 
 ## Reconciled semantics
 
