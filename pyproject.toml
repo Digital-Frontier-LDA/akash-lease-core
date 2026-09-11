@@ -1,6 +1,6 @@
 [project]
 name = "akash-lease-core"
-version = "0.11.1"
+version = "0.12.0"
 description = "Sans-I/O core for Akash wallet, lease acquisition, identity, and lease-shell semantics."
 readme = "README.md"
 license = "MIT"

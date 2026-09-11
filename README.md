@@ -239,6 +239,198 @@ assert classify_groups(
 ).held is False
 ```
 
+## Close authorization policy
+
+`evaluate_close` is a pure decision boundary. It never closes a deployment and
+it never treats a successfully parsed group name as close authority. Every
+decision binds an exact `DeploymentKey` to a complete workload `Population`, an
+explicit `CloseIntent`, current lifecycle authority, authenticated producer
+evidence, and fresh observations from two agreeing chain readers.
+
+The intent variants are deliberately separate: CI cleanup, staging retirement,
+creator rollback, and production retirement. CI authority is
+denied for staging and production payloads. Production retirement requires its
+own typed authority. That authority binds one subject, release, environment,
+action, and single-use authorization to authenticated requester, approver,
+and executor principals. The approver is a human operator. The executor is a
+distinct machine principal proven to be neither an admin nor an approver. A
+human operator may request and approve the same action; an automated requester
+cannot approve itself. This preserves single-developer operation without
+letting a human approval become the executing credential.
+
+GitHub Environment evidence records both self-review and admin-bypass settings
+instead of assuming one configuration. Disabled self-review prevention is
+accepted for a human-originated request or a distinct authenticated requester.
+Enabled admin bypass requires an explicit policy and non-admin automation. If
+bypass was used, a source-bound event must identify the authorized human
+approver; unknown or automated actors deny. The authority also binds the
+approved workflow commit and ref. External approval sources carry no GitHub
+environment bypass evidence and must provide equivalent separation,
+uniqueness, and verification guarantees. A generic
+`force` input does not exist. Unknown, incomplete, malformed, or mixed group
+populations are held.
+Every decision receives a deterministic `evaluated_at` value and checks it
+against the observation and validity intervals on chain, authority, signer, and
+attestation-verification evidence. Out-of-window evidence is held. Callers also
+report how many deployments matched the lifecycle
+attribution; zero or multiple candidates are held even when each candidate's
+group names parse correctly.
+
+Pre-close evidence uses `EXACT_FINALIZED_HEIGHT`: both independent trust paths
+must observe the same finalized height. It carries explicit deployment state,
+group count/digest, and lease count/digest/completeness. A zero-lease population
+is accepted only as `EXACT_NEVER_LEASED` with the canonical empty-population
+digest; an ordinary complete claim with zero matches is vacuous and held.
+
+Producer authentication has two forms. `IsolatedSignerEvidence` records a
+fresh, source-bound signer read for one chain owner, repository, workload class,
+and trust domain. For shared signers, `CreationAttestation` is deliberately
+neutral claim data. `AttestationVerification` separately binds the exact claim
+digest to a pinned deployment-broker trust root, verified issuer and audience,
+signature outcome, operation-key uniqueness outcome, and validity interval.
+OIDC authenticates the producer to that broker; the broker attests the returned
+owner and DSEQ after creation. The attestation retains the producer token's
+issuer, audience, subject, and replay-checked `jti`, plus GitHub's stable
+repository IDs, branch/tag `ref`, `workflow_ref` with its separate
+`workflow_sha`, and optional-together `job_workflow_ref`/`job_workflow_sha` for
+reusable-workflow jobs. The core checks these bindings but performs no OIDC,
+signature, journal, or clock I/O.
+
+```python
+from akash_lease_core import (
+    CIAuthority,
+    CandidateCompleteness,
+    CandidatePopulation,
+    ChainEvidence,
+    ChainProofMode,
+    CloseDisposition,
+    CloseIntent,
+    ConsumerState,
+    LeasePopulationCompleteness,
+    IsolatedSignerEvidence,
+    PreCloseDeploymentState,
+    RunState,
+    SourceAgreement,
+    UniquenessStatus,
+    canonical_prepared_operation_key,
+    canonical_deployment_population_digest,
+    canonical_group_identity_digest,
+    evaluate_close,
+)
+
+decision = evaluate_close(
+    subject=deployment_key,
+    population=population,
+    intent=CloseIntent.CI_CLEANUP,
+    authority=CIAuthority(
+        subject=deployment_key,
+        repository="example-org/example-repo",
+        run=12345,
+        attempt=2,
+        run_state=RunState.TERMINAL,
+        consumer_state=ConsumerState.FINISHED,
+        source="github-api:example-org/example-repo",
+        observation_digest="github-run-and-consumers-digest",
+        observed_at=1757500000,
+        valid_until=1757500060,
+    ),
+    chain_evidence=ChainEvidence(
+        subject=deployment_key,
+        group_identity_digest=canonical_group_identity_digest(population),
+        evidence_digest="two-source-preclose-digest",
+        chain_id="akashnet-2",
+        source_a="rpc-a.example",
+        source_b="rpc-b.example",
+        trust_path_a="operator-a/root-1",
+        trust_path_b="operator-b/root-2",
+        source_a_height=20000000,
+        source_b_height=20000000,
+        common_finality_height=20000000,
+        proof_mode=ChainProofMode.EXACT_FINALIZED_HEIGHT,
+        deployment_count=1,
+        deployment_population_digest=canonical_deployment_population_digest(deployment_key),
+        deployment_state=PreCloseDeploymentState.ACTIVE,
+        deployment_state_digest="active-deployment-state-digest",
+        group_count=population.observed_count,
+        group_population_digest=canonical_group_identity_digest(population),
+        group_state_digest="complete-group-state-digest",
+        lease_count=2,
+        lease_population_digest="two-complete-leases-digest",
+        lease_state_digest="complete-lease-state-digest",
+        lease_completeness=LeasePopulationCompleteness.COMPLETE,
+        observed_at=1757500000,
+        valid_until=1757500060,
+        agreement=SourceAgreement.AGREEING,
+    ),
+    producer_authentication=IsolatedSignerEvidence(
+        signer_owner=deployment_key.owner,
+        repository="example-org/example-repo",
+        workload_class="ci-runner",
+        operation_id="create-op-123",
+        environment=None,
+        trust_domain="example-org/example-repo:ci-signer",
+        source="backend-owner-read",
+        evidence_digest="backend-owner-evidence-digest",
+        observed_at=1757500000,
+        valid_until=1757500060,
+    ),
+    candidates=CandidatePopulation(
+        subject=deployment_key,
+        group_identity_digest=canonical_group_identity_digest(population),
+        operation_id="create-op-123",
+        operation_ordinal=1,
+        count=1,
+        completeness=CandidateCompleteness.COMPLETE,
+        prepared_operation_key=canonical_prepared_operation_key(
+            signer_owner=deployment_key.owner,
+            producer_repository="example-org/example-repo",
+            workload_class="ci-runner",
+            operation_id="create-op-123",
+            operation_ordinal=1,
+            prepared_group_identity_digest=canonical_group_identity_digest(population),
+            run=12345,
+            run_attempt=2,
+        ),
+        uniqueness_status=UniquenessStatus.UNIQUE,
+        evidence_digest="candidate-journal-digest",
+        creation_authorization_reference=None,
+    ),
+    evaluated_at=1757500000,
+)
+assert decision.disposition is CloseDisposition.ALLOW
+```
+
+Reviewed legacy retirement is intentionally absent from the public v0.12 API.
+Unknown and legacy identity populations hold; exposing an authority variant
+that can never allow would invite consumers to mistake representation for a
+working retirement path.
+
+Creator rollback is the narrow exception to two-source pre-close reads. Its
+capability is prepared before creation, then must gain a positive same-operation
+binding from the create transaction/event or an exact complete chain readback
+whose group digest equals the prepared digest. A response DSEQ by itself is not
+enough on a shared owner. The capability also binds the repository, complete
+lifecycle identity, and original payload creation authorization. Fresh,
+source-bound handoff evidence must say `FAILED`; `SUCCEEDED`, `UNKNOWN`, stale,
+or unreadable trigger evidence denies compensation. This permits immediate
+compensation after a proven failed handoff without converting a later sweeper
+into creator authority or allowing it to close a healthy deployment.
+
+Version 1 workload names intentionally remain unchanged. They do not encode a
+create ordinal, so a retry or redeploy can create multiple deployments with the
+same repository/class/run/attempt identity. A complete `CandidatePopulation`
+and journal-backed prepared-operation key close that ambiguity at policy time. A future
+on-chain identity schema can add an ordinal without silently changing the
+established `idv1` wire format.
+
+This contract authorizes an attempted close; it does not claim the outcome.
+Post-close policy remains a separate cohesive contract because execution
+closure and settlement are independent: deployment/groups/leases may be
+terminal while escrow is `overdrawn_unsettled`. A later core slice must model
+execution closure separately from `settled`, `overdrawn_unsettled`, and
+`unknown` settlement evidence rather than require escrow closure to call a
+workload closed.
+
 ## Reconciled semantics
 
 This package unifies two prior implementations that had **drifted**. Rather than silently imposing one, both behaviours are explicit:
