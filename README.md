@@ -1,8 +1,8 @@
 # akash-lease-core
 
-Sans-I/O core for Akash **wallet, lease acquisition, workload identity, and
+Sans-I/O core for Akash **wallet, lease acquisition, deployment identity, workload identity, and
 lease-shell semantics**: deterministic wallet ranking, a deadline-bound
-provider auction, canonical deployment-group identity, frame codec, URL
+provider auction, canonical owner/DSEQ and deployment-group identities, frame codec, URL
 builders, and trustworthy exec result interpretation.
 
 No sockets. No event loop. No `ssl`, `websockets`, `requests`, or `httpx`. Stdlib only, **zero runtime dependencies**.
@@ -43,17 +43,17 @@ purpose: a third copy is the failure centralising the code was meant to remove.
 
 ⇒ For a §-numbered mandate, read **df-wiki**. For the CI contract, read **df-cicd**.
 
-### Consumer versions — measured 2026-08-31
+### Consumer versions — measured 2026-09-11
 
 Adoption of the *code* is complete: across just-akash (18 importers), Blazing-Back (14) and
 akash-github-runner (3) there are **zero local re-definitions** of `qualified_set`,
 `evaluate_provider`, `from_provider_status` or `PreferredSelection`. Nobody has forked the
 logic.
 
-The *version* is one release behind in both consumers:
+The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.11.0
+akash-lease-core main   0.11.1
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -65,7 +65,7 @@ docstring discussing older behaviour. #33 read those as live pins and reported a
 range inside one consumer; the resolved skew is a single version. A naive grep counts prose as
 configuration, and here it inflated the finding by two versions.
 
-⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.11.0` contains behaviour
+⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.11.1` contains behaviour
 changes that matter has not been determined. Upgrading consumers onto a version nobody has
 diffed is how a shared library becomes an incident — establish the intended pin contract
 (#32) first.
@@ -185,6 +185,12 @@ re-running the richest-wallet rule during cleanup is unsafe because balances can
 change after creation.
 
 ## Workload identity
+
+`DeploymentKey` keeps the chain owner and DSEQ together as the identity used by
+exact deployment reads and destructive operations. It rejects owner strings that
+are not lowercase, checksum-valid, 20-byte `akash` Bech32 accounts and DSEQs that
+are not canonical positive Akash uint64 strings. A caller must not validate the
+two fields separately and later pass a bare DSEQ across an authorization boundary.
 
 `format_identity`, `parse_identity`, `classify_groups`, and `transform_sdl`
 implement the versioned `idv1` group-name contract shared by Akash producers
