@@ -150,6 +150,19 @@ from .wallets import (
     WalletSelectionStatus,
     rank_wallets,
 )
+from .workload_identity import (
+    CLASSES,
+    IDENTITY_SCHEMA_VERSION,
+    MAX_UTC_UNIX_SECONDS,
+    GroupObservation,
+    Identity,
+    Population,
+    PopulationCompleteness,
+    classify_groups,
+    format_identity,
+    parse_identity,
+    transform_sdl,
+)
 
 __all__ = [
     "Outcome",
@@ -210,6 +223,17 @@ __all__ = [
     "QuotaState",
     "ReadinessEvidence",
     "evaluate_lease_recovery",
+    "CLASSES",
+    "IDENTITY_SCHEMA_VERSION",
+    "MAX_UTC_UNIX_SECONDS",
+    "GroupObservation",
+    "Identity",
+    "Population",
+    "PopulationCompleteness",
+    "classify_groups",
+    "format_identity",
+    "parse_identity",
+    "transform_sdl",
     "BID_WINDOW_SAFETY_FACTOR",
     "BID_WINDOW_SECONDS",
     "DEFAULT_MIN_AGE_SECONDS",
@@ -226,7 +250,7 @@ __all__ = [
     "select_batch",
 ]
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
