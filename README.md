@@ -239,6 +239,31 @@ assert classify_groups(
 ).held is False
 ```
 
+## Durable create-journal contract
+
+`CreateJournal` is the immutable, sans-I/O state machine for one or more create
+operations. A `PreparedCreate` binds the authenticated producer, lifecycle,
+authoritatively resolved owner candidate, exact request and SDL digests, source
+revision, and complete ordered `(gseq, group_name)` population before a create
+side effect. `SubmissionEvidence` then records either the exact signed bytes,
+transaction hash and account sequence for a self-managed backend, or a
+server-issued submission token for a mediated backend.
+
+`CreateOutcome` keeps `rejected_before_send`, `fallback_safe`, `committed`, and
+`unknown` distinct with stable `OutcomeReasonCode` values. Broad exceptions,
+process and HTTP timeouts, response loss, and backend or provider rotation are
+always unknown. A deployment reaches `created` only when a transaction event or
+exact chain read binds its canonical owner/DSEQ and complete group digest to the
+prepared operation. A copied owner/DSEQ pair is therefore not binding evidence.
+
+Every entry includes its predecessor digest and its own canonical digest.
+`CreateJournal.append` returns a new journal and revalidates the full history,
+including operation uniqueness, permitted state edges, immutable prepared
+fields, one deployment per operation, one operation per deployment, and
+monotonic settlement. The package deliberately supplies no database, broker,
+filesystem, clock, chain reader, or consumer integration; adapters must provide
+atomic durable create/append and reread behavior around this contract.
+
 ## Close authorization policy
 
 `evaluate_close` is a pure decision boundary. It never closes a deployment and
