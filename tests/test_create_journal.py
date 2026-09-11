@@ -13,6 +13,7 @@ from akash_lease_core import (
     DeploymentKey,
     ExactChainReadEvidence,
     ExecutionClosure,
+    ExecutionClosureProofMode,
     HandoffFailure,
     JournalEntry,
     JournalState,
@@ -154,6 +155,31 @@ def _committed(**changes):
     return replace(value, **changes)
 
 
+def _execution_closure(**changes):
+    value = ExecutionClosure(
+        operation_id=OPERATION,
+        subject=DeploymentKey(OWNER, "9001"),
+        chain_id="akashnet-2",
+        proof_mode=ExecutionClosureProofMode.EXACT_FINALIZED_HEIGHT,
+        source_a="https://rpc-a.example",
+        source_b="https://rpc-b.example",
+        operator_identity_a="operator-a",
+        operator_identity_b="operator-b",
+        trust_path_a="operator-a/root-1",
+        trust_path_b="operator-b/root-2",
+        operator_independence_verified=True,
+        source_a_height=123_460,
+        source_b_height=123_460,
+        common_finality_height=123_460,
+        close_transaction_height=123_459,
+        group_population_digest=GROUP_DIGEST,
+        lease_population_digest="8" * 64,
+        evidence_digest="9" * 64,
+        observed_at=NOW + 5,
+    )
+    return replace(value, **changes)
+
+
 def _prepared_journal():
     return CreateJournal().append(JournalState.PREPARED, _prepared(), recorded_at=NOW)
 
@@ -211,16 +237,7 @@ def test_complete_recovery_path_is_append_only_and_keeps_settlement_separate():
     )
     journal = journal.append(
         JournalState.EXECUTION_CLOSED,
-        ExecutionClosure(
-            OPERATION,
-            subject,
-            "rpc-a",
-            "rpc-b",
-            GROUP_DIGEST,
-            "8" * 64,
-            "9" * 64,
-            NOW + 5,
-        ),
+        _execution_closure(subject=subject),
         recorded_at=NOW + 5,
     )
     for offset, state in enumerate(
@@ -247,6 +264,52 @@ def test_complete_recovery_path_is_append_only_and_keeps_settlement_separate():
         JournalState.SETTLEMENT,
     )
     assert journal.entries[-1].payload.state is SettlementState.SETTLED
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ({"chain_id": ""}, "chain_id"),
+        ({"proof_mode": "exact_finalized_height"}, "typed proof mode"),
+        ({"source_a": ""}, "source_a"),
+        ({"source_b": ""}, "source_b"),
+        ({"operator_identity_a": ""}, "operator_identity_a"),
+        ({"operator_identity_b": ""}, "operator_identity_b"),
+        ({"trust_path_a": ""}, "trust_path_a"),
+        ({"trust_path_b": ""}, "trust_path_b"),
+        ({"source_b": "https://rpc-a.example"}, "independently operated"),
+        ({"operator_identity_b": "operator-a"}, "independently operated"),
+        ({"trust_path_b": "operator-a/root-1"}, "independently operated"),
+        ({"operator_independence_verified": False}, "independently operated"),
+        ({"operator_independence_verified": 1}, "independently operated"),
+        ({"source_a_height": 0}, "source_a_height"),
+        ({"source_b_height": True}, "source_b_height"),
+        ({"common_finality_height": -1}, "common_finality_height"),
+        ({"close_transaction_height": 0}, "close_transaction_height"),
+        ({"source_a_height": 123_461}, "one exact finalized height"),
+        ({"source_b_height": 123_461}, "one exact finalized height"),
+        ({"common_finality_height": 123_461}, "one exact finalized height"),
+        ({"close_transaction_height": 123_461}, "at or after the close height"),
+    ],
+)
+def test_execution_closure_requires_independent_finalized_post_close_reads(mutation, message):
+    """Every declared independence/finality field is an enforcing boundary."""
+
+    with pytest.raises(ValueError, match=message):
+        _execution_closure(**mutation)
+
+
+def test_execution_closure_records_auditable_finality_and_operator_identity():
+    closure = _execution_closure(close_transaction_height=123_460)
+
+    assert closure.proof_mode is ExecutionClosureProofMode.EXACT_FINALIZED_HEIGHT
+    assert closure.source_a_height == closure.source_b_height == closure.common_finality_height
+    assert closure.common_finality_height == closure.close_transaction_height
+    assert (closure.operator_identity_a, closure.operator_identity_b) == (
+        "operator-a",
+        "operator-b",
+    )
+    assert closure.operator_independence_verified is True
 
 
 def test_unknown_create_can_only_reconcile_to_the_prepared_owner_and_groups():
