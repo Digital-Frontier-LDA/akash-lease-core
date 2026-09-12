@@ -17,7 +17,7 @@ from enum import Enum
 from .chain_identity import DeploymentKey, is_canonical_akash_owner
 from .workload_identity import Identity, Population, PopulationCompleteness
 
-CLOSE_POLICY_VERSION = 1
+CLOSE_POLICY_VERSION = 2
 
 
 class CloseIntent(str, Enum):
@@ -31,6 +31,66 @@ class CloseDisposition(str, Enum):
     ALLOW = "allow"
     HOLD = "hold"
     DENY = "deny"
+
+
+class CloseReasonCode(str, Enum):
+    """Stable machine reasons for every close-policy outcome.
+
+    Values are grouped by the policy stage which stopped evaluation.  Human
+    diagnostics live in :attr:`CloseDecision.message` and may change without
+    changing adapter behaviour.
+    """
+
+    CLASSIFICATION_INCOMPLETE = "classification.incomplete"
+    CLASSIFICATION_HELD = "classification.held"
+    CLASSIFICATION_COUNT_MISMATCH = "classification.count_mismatch"
+    CLASSIFICATION_LIFECYCLE_MIXED = "classification.lifecycle_mixed"
+    CANDIDATE_INCOMPLETE_OR_NON_UNIQUE = "candidate.incomplete_or_non_unique"
+    CLASS_POLICY_FORBIDS_INTENT = "class_policy.forbids_intent"
+    PRODUCER_UNAUTHENTICATED = "producer_authentication.missing"
+    PRODUCER_SHARED_EVIDENCE_INVALID = "producer_authentication.shared_invalid"
+    PRODUCER_ISOLATED_EVIDENCE_INVALID = "producer_authentication.isolated_invalid"
+    CHAIN_EVIDENCE_MISSING = "chain_evidence.missing"
+    CHAIN_EVIDENCE_WRONG_POPULATION = "chain_evidence.wrong_population"
+    CHAIN_EVIDENCE_TRUST_PATHS_INCOMPLETE = "chain_evidence.trust_paths_incomplete"
+    CHAIN_EVIDENCE_DIGEST_OR_INTERVAL_INCOMPLETE = "chain_evidence.digest_or_interval_incomplete"
+    CHAIN_POPULATION_INCOMPLETE_OR_MISMATCHED = "chain_evidence.population_mismatch"
+    CHAIN_LEASE_POPULATION_INCOMPLETE = "chain_evidence.lease_population_incomplete"
+    CHAIN_SOURCES_DISAGREE = "chain_evidence.sources_disagree"
+    AUTHORITY_MISSING = "lifecycle_authority.missing"
+    AUTHORITY_EVIDENCE_INCOMPLETE = "lifecycle_authority.evidence_incomplete"
+    AUTHORITY_REPLAYED = "lifecycle_authority.replayed"
+    AUTHORITY_INVALID = "lifecycle_authority.invalid"
+    AUTHORITY_WRONG_TYPE = "lifecycle_authority.wrong_type"
+    AUTHORITY_IDENTITY_DISAGREEMENT = "lifecycle_authority.identity_disagreement"
+    AUTHORIZATION_SUCCEEDED = "authorization.succeeded"
+
+
+_CLOSE_REASON_DISPOSITIONS = {
+    CloseReasonCode.CLASSIFICATION_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CLASSIFICATION_HELD: CloseDisposition.HOLD,
+    CloseReasonCode.CLASSIFICATION_COUNT_MISMATCH: CloseDisposition.HOLD,
+    CloseReasonCode.CLASSIFICATION_LIFECYCLE_MIXED: CloseDisposition.HOLD,
+    CloseReasonCode.CANDIDATE_INCOMPLETE_OR_NON_UNIQUE: CloseDisposition.HOLD,
+    CloseReasonCode.CLASS_POLICY_FORBIDS_INTENT: CloseDisposition.DENY,
+    CloseReasonCode.PRODUCER_UNAUTHENTICATED: CloseDisposition.HOLD,
+    CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID: CloseDisposition.HOLD,
+    CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_MISSING: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_WRONG_POPULATION: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_TRUST_PATHS_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_DIGEST_OR_INTERVAL_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_POPULATION_INCOMPLETE_OR_MISMATCHED: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_LEASE_POPULATION_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_SOURCES_DISAGREE: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_MISSING: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_REPLAYED: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_INVALID: CloseDisposition.DENY,
+    CloseReasonCode.AUTHORITY_WRONG_TYPE: CloseDisposition.DENY,
+    CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT: CloseDisposition.DENY,
+    CloseReasonCode.AUTHORIZATION_SUCCEEDED: CloseDisposition.ALLOW,
+}
 
 
 class SourceAgreement(str, Enum):
@@ -119,30 +179,26 @@ class CreationBindingMode(str, Enum):
 class AuthorityValidation:
     """Typed result for lifecycle-authority validation."""
 
-    reason: str
+    reason_code: CloseReasonCode
+    message: str
     evidence_gap: bool = False
 
 
-_EVIDENCE_GAP_REASONS = {
-    "lifecycle authority lacks source-bound observation evidence",
-    "lifecycle authority is not valid at evaluation time",
-    "production principal authentication is missing or unverified",
-    "production approver role is unverified",
-    "production executor non-admin role evidence is unverified",
-    "GitHub environment bypass evidence is missing or untyped",
-    "GitHub environment bypass evidence is missing",
-    "GitHub environment bypass observation is unverified",
-    "GitHub environment self-review policy is unverified",
-    "GitHub environment admin bypass policy is unverified",
-    "enabled GitHub admin bypass lacks explicit policy authorization",
-    "automated requester admin status is unverified",
-    "GitHub admin bypass use is unknown",
-    "GitHub admin bypass actor is unknown",
-}
+@dataclass(frozen=True)
+class _Reason:
+    reason_code: CloseReasonCode
+    message: str
 
 
-def _authority_failure(reason: str) -> AuthorityValidation:
-    return AuthorityValidation(reason, reason in _EVIDENCE_GAP_REASONS)
+def _authority_hold(
+    message: str,
+    reason_code: CloseReasonCode = CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+) -> AuthorityValidation:
+    return AuthorityValidation(reason_code, message, True)
+
+
+def _authority_deny(message: str) -> AuthorityValidation:
+    return AuthorityValidation(CloseReasonCode.AUTHORITY_INVALID, message)
 
 
 class HandoffState(str, Enum):
@@ -425,7 +481,8 @@ class CloseDecision:
     disposition: CloseDisposition
     intent: CloseIntent
     subject: DeploymentKey
-    reason: str
+    reason_code: CloseReasonCode
+    message: str
     workload_class: str | None = None
     observed_groups: int = 0
     matching_candidate_count: int = 0
@@ -444,9 +501,30 @@ class CloseDecision:
     finalized_height: int | None = None
     policy_version: int = CLOSE_POLICY_VERSION
 
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.disposition, CloseDisposition)
+            or not isinstance(self.intent, CloseIntent)
+            or not isinstance(self.subject, DeploymentKey)
+            or not isinstance(self.reason_code, CloseReasonCode)
+            or not _nonempty(self.message)
+        ):
+            raise ValueError("close decision requires typed identity, disposition, and reason")
+        if type(self.policy_version) is not int or self.policy_version != CLOSE_POLICY_VERSION:
+            raise ValueError("close decision policy version does not match this contract")
+        expected_disposition = _CLOSE_REASON_DISPOSITIONS.get(self.reason_code)
+        if expected_disposition is not self.disposition:
+            raise ValueError("close reason code and disposition must agree")
+
     @property
     def allowed(self) -> bool:
         return self.disposition is CloseDisposition.ALLOW
+
+    @property
+    def reason(self) -> str:
+        """Compatibility alias for the human diagnostic; branch on ``reason_code``."""
+
+        return self.message
 
 
 def _digest(value: object) -> str:
@@ -456,29 +534,43 @@ def _digest(value: object) -> str:
     return hashlib.sha256(encoded.encode("ascii")).hexdigest()
 
 
-def _classified(population: object) -> tuple[Identity | None, str]:
+def _classified(population: object) -> tuple[Identity | None, _Reason | None]:
     if not isinstance(population, Population):
         raise ValueError("an explicit workload Population is required")
     if population.completeness is not PopulationCompleteness.COMPLETE:
-        return None, "group population is incomplete or unverified"
+        return None, _Reason(
+            CloseReasonCode.CLASSIFICATION_INCOMPLETE,
+            "group population is incomplete or unverified",
+        )
     if population.held:
-        return None, population.reason or "workload population is held"
+        return None, _Reason(
+            CloseReasonCode.CLASSIFICATION_HELD,
+            population.reason or "workload population is held",
+        )
     if (
         not population.identities
         or population.parsed_count != population.observed_count
         or len(population.identities) != population.observed_count
     ):
-        return None, "classified population counts disagree"
+        return None, _Reason(
+            CloseReasonCode.CLASSIFICATION_COUNT_MISMATCH,
+            "classified population counts disagree",
+        )
     first = population.identities[0]
     if any(item.lifecycle != first.lifecycle for item in population.identities):
-        return None, "mixed workload lifecycle population"
-    return first, "classified"
+        return None, _Reason(
+            CloseReasonCode.CLASSIFICATION_LIFECYCLE_MIXED,
+            "mixed workload lifecycle population",
+        )
+    return first, None
 
 
 def canonical_group_identity_digest(population: Population) -> str:
     identity, reason = _classified(population)
     if identity is None:
-        raise ValueError(reason)
+        if reason is None:  # pragma: no cover - closed internal result type
+            raise AssertionError("classification failure requires a reason")
+        raise ValueError(reason.message)
     payload = [asdict(item) for item in sorted(population.identities, key=lambda item: item.group)]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("ascii")).hexdigest()
@@ -584,7 +676,8 @@ def _decision(
     subject: DeploymentKey,
     population: Population,
     candidates: CandidatePopulation,
-    reason: str,
+    reason_code: CloseReasonCode,
+    message: str,
     *,
     evaluated_at: int,
     identity: Identity | None = None,
@@ -596,7 +689,8 @@ def _decision(
         disposition,
         intent,
         subject,
-        reason,
+        reason_code,
+        message,
         workload_class=identity.workload_class if identity else None,
         observed_groups=population.observed_count,
         matching_candidate_count=candidates.count,
@@ -623,7 +717,7 @@ def _shared_reason(
     identity: Identity,
     candidates: CandidatePopulation,
     evaluated_at: int,
-) -> str | None:
+) -> _Reason | None:
     if not isinstance(evidence.attestation, CreationAttestation) or not isinstance(
         evidence.verification, AttestationVerification
     ):
@@ -641,9 +735,15 @@ def _shared_reason(
     }
     for field, value in expected.items():
         if getattr(claim, field) != value:
-            return f"creation attestation {field} does not match observed deployment"
+            return _Reason(
+                CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+                f"creation attestation {field} does not match observed deployment",
+            )
     if type(claim.schema_version) is not int or claim.schema_version != 1:
-        return "unsupported creation attestation schema version"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "unsupported creation attestation schema version",
+        )
     if not _nonempty(
         claim.audience,
         claim.issuer,
@@ -657,32 +757,53 @@ def _shared_reason(
         claim.producer_oidc_subject,
         claim.producer_oidc_jti,
     ):
-        return "creation attestation is missing provenance claims"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "creation attestation is missing provenance claims",
+        )
     if (
         re.fullmatch(r"[1-9][0-9]*", claim.repository_id) is None
         or re.fullmatch(r"[1-9][0-9]*", claim.repository_owner_id) is None
         or re.fullmatch(r"[0-9a-f]{40}", claim.workflow_sha) is None
     ):
-        return "creation attestation provenance is not immutable"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "creation attestation provenance is not immutable",
+        )
     job_pair_present = claim.job_workflow_ref is not None or claim.job_workflow_sha is not None
     if job_pair_present and (
         not _nonempty(claim.job_workflow_ref)
         or not isinstance(claim.job_workflow_sha, str)
         or re.fullmatch(r"[0-9a-f]{40}", claim.job_workflow_sha) is None
     ):
-        return "reusable workflow ref and sha must be present together"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "reusable workflow ref and sha must be present together",
+        )
     if type(claim.issued_at) is not int or claim.issued_at <= 0:
-        return "creation attestation has no canonical issued-at time"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "creation attestation has no canonical issued-at time",
+        )
     if identity.run is not None and (
         type(claim.run) is not int or type(claim.run_attempt) is not int
     ):
-        return "creation attestation CI lifecycle numbers are not canonical integers"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "creation attestation CI lifecycle numbers are not canonical integers",
+        )
     if identity.workload_class in {"staging-payload", "prod-payload"} and not _nonempty(
         claim.authorization_reference, claim.environment
     ):
-        return "payload creation attestation lacks its authorization reference"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "payload creation attestation lacks its authorization reference",
+        )
     if check.attestation_digest != canonical_attestation_digest(claim):
-        return "verification is bound to another attestation"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "verification is bound to another attestation",
+        )
     if not _nonempty(
         check.trust_root,
         check.verified_issuer,
@@ -692,9 +813,15 @@ def _shared_reason(
         check.verified_producer_oidc_subject,
         check.verified_producer_oidc_jti,
     ):
-        return "attestation verification lacks its trust binding"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "attestation verification lacks its trust binding",
+        )
     if check.verified_issuer != claim.issuer or check.verified_audience != claim.audience:
-        return "attestation verifier result disagrees with the claims"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "attestation verifier result disagrees with the claims",
+        )
     if (
         check.verified_producer_oidc_issuer,
         check.verified_producer_oidc_audience,
@@ -706,17 +833,32 @@ def _shared_reason(
         claim.producer_oidc_subject,
         claim.producer_oidc_jti,
     ):
-        return "producer OIDC verifier result disagrees with broker claims"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "producer OIDC verifier result disagrees with broker claims",
+        )
     if check.signature_status is not VerificationStatus.VERIFIED:
-        return "attestation signature is failed or unverified"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "attestation signature is failed or unverified",
+        )
     if check.uniqueness_status is not UniquenessStatus.UNIQUE:
-        return "creation operation id is reused or unverified"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "creation operation id is reused or unverified",
+        )
     if check.producer_jti_uniqueness_status is not UniquenessStatus.UNIQUE:
-        return "producer OIDC jti is reused or unverified"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "producer OIDC jti is reused or unverified",
+        )
     if claim.issued_at > check.observed_at or not _window(
         check.observed_at, evaluated_at, check.valid_until
     ):
-        return "attestation verification is not valid at evaluation time"
+        return _Reason(
+            CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+            "attestation verification is not valid at evaluation time",
+        )
     return None
 
 
@@ -726,25 +868,40 @@ def _isolated_reason(
     identity: Identity,
     candidates: CandidatePopulation,
     evaluated_at: int,
-) -> str | None:
+) -> _Reason | None:
     if (evidence.signer_owner, evidence.repository, evidence.workload_class) != (
         subject.owner,
         identity.owner,
         identity.workload_class,
     ):
-        return "isolated signer evidence does not match deployment identity"
+        return _Reason(
+            CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID,
+            "isolated signer evidence does not match deployment identity",
+        )
     if evidence.operation_id != candidates.operation_id:
-        return "isolated signer evidence does not match creation operation"
+        return _Reason(
+            CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID,
+            "isolated signer evidence does not match creation operation",
+        )
     if identity.workload_class in {"staging-payload", "prod-payload"} and not _nonempty(
         evidence.environment
     ):
-        return "payload signer evidence lacks environment binding"
+        return _Reason(
+            CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID,
+            "payload signer evidence lacks environment binding",
+        )
     if not _nonempty(
         evidence.operation_id, evidence.trust_domain, evidence.source, evidence.evidence_digest
     ):
-        return "isolated signer evidence lacks source-bound trust evidence"
+        return _Reason(
+            CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID,
+            "isolated signer evidence lacks source-bound trust evidence",
+        )
     if not _window(evidence.observed_at, evaluated_at, evidence.valid_until):
-        return "isolated signer evidence is not valid at evaluation time"
+        return _Reason(
+            CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID,
+            "isolated signer evidence is not valid at evaluation time",
+        )
     return None
 
 
@@ -752,7 +909,7 @@ def _authority_reason(
     authority: LifecycleAuthority, subject: DeploymentKey, evaluated_at: int
 ) -> AuthorityValidation | None:
     if authority.subject != subject:
-        return _authority_failure("authority is bound to another deployment")
+        return _authority_deny("authority is bound to another deployment")
     if isinstance(authority, CreatorRollbackAuthority):
         if not _nonempty(
             authority.operation_id,
@@ -761,7 +918,7 @@ def _authority_reason(
             authority.backend,
             authority.capability_reference,
         ):
-            return _authority_failure("creator capability lacks operation or backend provenance")
+            return _authority_deny("creator capability lacks operation or backend provenance")
         if (
             authority.binding_status is not CreationBindingStatus.CONFIRMED
             or authority.binding_mode
@@ -771,22 +928,22 @@ def _authority_reason(
             }
             or not _nonempty(authority.binding_source, authority.binding_evidence_digest)
         ):
-            return _authority_failure(
+            return _authority_deny(
                 "creator capability lacks positive same-operation creation binding"
             )
         if not _window(authority.prepared_at, evaluated_at, authority.valid_until):
-            return _authority_failure("creator capability is not valid at evaluation time")
+            return _authority_deny("creator capability is not valid at evaluation time")
         trigger = authority.rollback_trigger
         if not isinstance(trigger, RollbackTriggerEvidence):
-            return _authority_failure("creator rollback trigger is untyped")
+            return _authority_deny("creator rollback trigger is untyped")
         if trigger.handoff_state is not HandoffState.FAILED:
-            return _authority_failure("creator rollback requires a failed handoff")
+            return _authority_deny("creator rollback requires a failed handoff")
         if not _nonempty(trigger.source, trigger.evidence_digest):
-            return _authority_failure("creator rollback trigger lacks source-bound evidence")
+            return _authority_deny("creator rollback trigger lacks source-bound evidence")
         if trigger.observed_at < authority.prepared_at or not _window(
             trigger.observed_at, evaluated_at, trigger.valid_until
         ):
-            return _authority_failure("creator rollback trigger is not valid at evaluation time")
+            return _authority_deny("creator rollback trigger is not valid at evaluation time")
         return None
     if isinstance(authority, ProductionRetirementAuthority):
         if not _nonempty(
@@ -804,48 +961,44 @@ def _authority_reason(
             authority.single_use_authorization_id,
             authority.unique_authorization_id,
         ):
-            return _authority_failure(
-                "production authority lacks identity or verification evidence"
-            )
+            return _authority_deny("production authority lacks identity or verification evidence")
         principals = (authority.requester, authority.approver, authority.executor)
         if any(not isinstance(item, ProductionPrincipal) for item in principals):
-            return _authority_failure("production authority has untyped principals")
+            return _authority_deny("production authority has untyped principals")
         if any(
             not _nonempty(item.principal, item.evidence_source, item.evidence_digest)
             or item.authentication_status is not VerificationStatus.VERIFIED
             for item in principals
         ):
-            return _authority_failure(
-                "production principal authentication is missing or unverified"
-            )
+            return _authority_hold("production principal authentication is missing or unverified")
         if authority.approver.kind is not PrincipalKind.HUMAN:
-            return _authority_failure("production approver is not an authenticated human")
+            return _authority_deny("production approver is not an authenticated human")
         if authority.approver.approval_role_membership is MembershipStatus.UNKNOWN:
-            return _authority_failure("production approver role is unverified")
+            return _authority_hold("production approver role is unverified")
         if authority.approver.approval_role_membership is not MembershipStatus.VERIFIED_MEMBER:
-            return _authority_failure("production human lacks the approval role")
+            return _authority_deny("production human lacks the approval role")
         if authority.executor.kind is not PrincipalKind.MACHINE:
-            return _authority_failure("production executor must be a machine principal")
+            return _authority_deny("production executor must be a machine principal")
         if authority.executor.principal == authority.approver.principal:
-            return _authority_failure("production executor is the approving principal")
+            return _authority_deny("production executor is the approving principal")
         if (
             authority.executor.admin_membership is MembershipStatus.VERIFIED_MEMBER
             or authority.executor.approval_role_membership is MembershipStatus.VERIFIED_MEMBER
         ):
-            return _authority_failure("production executor is an admin or approver")
+            return _authority_deny("production executor is an admin or approver")
         if (
             authority.executor.admin_membership is not MembershipStatus.VERIFIED_NON_MEMBER
             or authority.executor.approval_role_membership
             is not MembershipStatus.VERIFIED_NON_MEMBER
         ):
-            return _authority_failure("production executor non-admin role evidence is unverified")
+            return _authority_hold("production executor non-admin role evidence is unverified")
         if (
             authority.requester.kind is PrincipalKind.MACHINE
             and authority.requester.principal == authority.approver.principal
         ):
-            return _authority_failure("automated production requester cannot be its approver")
+            return _authority_deny("automated production requester cannot be its approver")
         if authority.action is not ProductionAuthorizationAction.PRODUCTION_RETIREMENT:
-            return _authority_failure("production authority action disagrees")
+            return _authority_deny("production authority action disagrees")
         if (
             authority.verified_authorization_id != authority.authorization_id
             or authority.verified_environment != authority.environment
@@ -853,71 +1006,74 @@ def _authority_reason(
             or authority.verified_subject != authority.subject
             or authority.verified_action != authority.action
         ):
-            return _authority_failure(
-                "production approval verification is bound to another action"
-            )
+            return _authority_deny("production approval verification is bound to another action")
         if authority.approval_verification_status is not VerificationStatus.VERIFIED:
-            return _authority_failure("production approval is unverified")
+            if authority.approval_verification_status is VerificationStatus.UNKNOWN:
+                return _authority_hold("production approval is unverified")
+            return _authority_deny("production approval verification failed")
         if authority.single_use_verification is not VerificationStatus.VERIFIED:
-            return _authority_failure("production single-use policy is unverified")
+            if authority.single_use_verification is VerificationStatus.UNKNOWN:
+                return _authority_hold("production single-use policy is unverified")
+            return _authority_deny("production single-use verification failed")
         if authority.single_use_authorization_id != authority.authorization_id:
-            return _authority_failure(
-                "production single-use proof is bound to another authorization"
+            return _authority_deny("production single-use proof is bound to another authorization")
+        if authority.authorization_uniqueness_status is UniquenessStatus.UNKNOWN:
+            return _authority_hold("production authorization uniqueness is unverified")
+        if authority.authorization_uniqueness_status is UniquenessStatus.REUSED:
+            return _authority_hold(
+                "production authorization was replayed",
+                CloseReasonCode.AUTHORITY_REPLAYED,
             )
         if authority.authorization_uniqueness_status is not UniquenessStatus.UNIQUE:
-            return _authority_failure("production authorization is reused or unverified")
+            return _authority_deny("production authorization uniqueness is invalid")
         if authority.unique_authorization_id != authority.authorization_id:
-            return _authority_failure(
-                "production uniqueness proof is bound to another authorization"
-            )
+            return _authority_deny("production uniqueness proof is bound to another authorization")
         if type(authority.issued_at) is not int or authority.issued_at <= 0:
-            return _authority_failure("production authorization issued-at is invalid")
+            return _authority_deny("production authorization issued-at is invalid")
         if authority.issued_at > authority.observed_at or not _window(
             authority.observed_at, evaluated_at, authority.valid_until
         ):
-            return _authority_failure("production authorization is not valid at evaluation time")
+            return _authority_deny("production authorization is not valid at evaluation time")
         if authority.approval_mode is ProductionApprovalMode.GITHUB_ENVIRONMENT:
             if not isinstance(authority.bypass, ProductionBypassEvidence):
-                return _authority_failure(
-                    "GitHub environment bypass evidence is missing or untyped"
-                )
+                return _authority_hold("GitHub environment bypass evidence is missing or untyped")
             if authority.prevent_self_review_status not in {
                 EnvironmentControlStatus.VERIFIED_ENABLED,
                 EnvironmentControlStatus.VERIFIED_DISABLED,
             }:
-                return _authority_failure("GitHub environment self-review policy is unverified")
+                return _authority_hold("GitHub environment self-review policy is unverified")
             if (
                 authority.prevent_self_review_status is EnvironmentControlStatus.VERIFIED_DISABLED
                 and authority.requester.kind is not PrincipalKind.HUMAN
                 and authority.requester.principal == authority.approver.principal
             ):
-                return _authority_failure(
+                return _authority_deny(
                     "disabled self-review prevention permits automated self-approval"
                 )
             bypass = authority.bypass
             if not isinstance(bypass, ProductionBypassEvidence) or not _nonempty(
                 bypass.observation_source, bypass.observation_digest
             ):
-                return _authority_failure("GitHub environment bypass evidence is missing")
+                return _authority_hold("GitHub environment bypass evidence is missing")
             if bypass.observation_verification_status is not VerificationStatus.VERIFIED:
-                return _authority_failure("GitHub environment bypass observation is unverified")
+                return _authority_hold("GitHub environment bypass observation is unverified")
             if bypass.configuration_status is EnvironmentControlStatus.UNKNOWN:
-                return _authority_failure("GitHub environment admin bypass policy is unverified")
+                return _authority_hold("GitHub environment admin bypass policy is unverified")
             if bypass.configuration_status is EnvironmentControlStatus.VERIFIED_DISABLED:
                 if bypass.use_status is not BypassUseStatus.UNUSED:
-                    return _authority_failure(
+                    return _authority_deny(
                         "disabled GitHub admin bypass has inconsistent use evidence"
                     )
             elif bypass.configuration_status is EnvironmentControlStatus.VERIFIED_ENABLED:
                 if bypass.enabled_bypass_policy_status is not VerificationStatus.VERIFIED:
-                    return _authority_failure(
+                    return _authority_hold(
                         "enabled GitHub admin bypass lacks explicit policy authorization"
                     )
                 if (
                     authority.requester.kind is PrincipalKind.MACHINE
                     and authority.requester.admin_membership is MembershipStatus.VERIFIED_MEMBER
                 ):
-                    return _authority_failure(
+                    return _authority_deny(
                         "automated requester is an admin while bypass is enabled"
                     )
                 if (
@@ -925,35 +1081,33 @@ def _authority_reason(
                     and authority.requester.admin_membership
                     is not MembershipStatus.VERIFIED_NON_MEMBER
                 ):
-                    return _authority_failure("automated requester admin status is unverified")
+                    return _authority_hold("automated requester admin status is unverified")
                 if bypass.use_status is BypassUseStatus.USED:
                     if not _nonempty(bypass.actor_principal):
-                        return _authority_failure("GitHub admin bypass actor is unknown")
+                        return _authority_hold("GitHub admin bypass actor is unknown")
                     if bypass.actor_principal != authority.approver.principal:
-                        return _authority_failure(
+                        return _authority_deny(
                             "GitHub admin bypass actor is not the authorized human"
                         )
                 elif bypass.use_status is BypassUseStatus.UNUSED:
                     if bypass.actor_principal is not None:
-                        return _authority_failure("unused GitHub admin bypass names an actor")
+                        return _authority_deny("unused GitHub admin bypass names an actor")
                 else:
-                    return _authority_failure("GitHub admin bypass use is unknown")
+                    return _authority_hold("GitHub admin bypass use is unknown")
             else:
-                return _authority_failure("GitHub environment admin bypass policy is unsupported")
+                return _authority_deny("GitHub environment admin bypass policy is unsupported")
             if (
                 not _nonempty(authority.workflow_ref, authority.ref)
                 or not isinstance(authority.workflow_sha, str)
                 or re.fullmatch(r"[0-9a-f]{40}", authority.workflow_sha) is None
             ):
-                return _authority_failure(
-                    "GitHub production approval lacks workflow and ref binding"
-                )
+                return _authority_deny("GitHub production approval lacks workflow and ref binding")
             if (
                 authority.verified_workflow_ref,
                 authority.verified_workflow_sha,
                 authority.verified_ref,
             ) != (authority.workflow_ref, authority.workflow_sha, authority.ref):
-                return _authority_failure(
+                return _authority_deny(
                     "GitHub approval verification is bound to another workflow or ref"
                 )
         elif authority.approval_mode is ProductionApprovalMode.EXTERNAL:
@@ -961,7 +1115,7 @@ def _authority_reason(
                 authority.prevent_self_review_status is not EnvironmentControlStatus.NOT_APPLICABLE
                 or authority.bypass is not None
             ):
-                return _authority_failure(
+                return _authority_deny(
                     "external production approval carries GitHub environment controls"
                 )
             if any(
@@ -975,27 +1129,28 @@ def _authority_reason(
                     authority.verified_ref,
                 )
             ):
-                return _authority_failure(
-                    "external production approval carries GitHub-only bindings"
-                )
+                return _authority_deny("external production approval carries GitHub-only bindings")
         else:
-            return _authority_failure("production approval mode is unsupported")
+            return _authority_deny("production approval mode is unsupported")
         return None
     if not _nonempty(authority.source, authority.observation_digest):
-        return _authority_failure("lifecycle authority lacks source-bound observation evidence")
+        return _authority_hold("lifecycle authority lacks source-bound observation evidence")
     if not _window(authority.observed_at, evaluated_at, authority.valid_until):
-        return _authority_failure("lifecycle authority is not valid at evaluation time")
+        return _authority_hold("lifecycle authority is not valid at evaluation time")
     return None
 
 
-def _class_denial(intent: CloseIntent, workload_class: str) -> str | None:
+def _class_denial(intent: CloseIntent, workload_class: str) -> _Reason | None:
     permitted = {
         CloseIntent.CI_CLEANUP: {"ci-runner", "ci-payload"},
         CloseIntent.STAGING_RETIREMENT: {"staging-payload"},
         CloseIntent.PRODUCTION_RETIREMENT: {"prod-payload"},
     }
     if intent in permitted and workload_class not in permitted[intent]:
-        return f"{intent.value} cannot retire {workload_class}"
+        return _Reason(
+            CloseReasonCode.CLASS_POLICY_FORBIDS_INTENT,
+            f"{intent.value} cannot retire {workload_class}",
+        )
     return None
 
 
@@ -1012,14 +1167,19 @@ def _authorize(
     chain: ChainEvidence | None,
     evaluated_at: int,
 ) -> CloseDecision:
-    def result(disposition: CloseDisposition, reason: str) -> CloseDecision:
+    def result(
+        disposition: CloseDisposition,
+        reason_code: CloseReasonCode,
+        message: str,
+    ) -> CloseDecision:
         return _decision(
             disposition,
             intent,
             subject,
             population,
             candidates,
-            reason,
+            reason_code,
+            message,
             evaluated_at=evaluated_at,
             identity=identity,
             authority=authority,
@@ -1027,7 +1187,11 @@ def _authorize(
         )
 
     if authority is None:
-        return result(CloseDisposition.HOLD, "lifecycle authority is missing")
+        return result(
+            CloseDisposition.HOLD,
+            CloseReasonCode.AUTHORITY_MISSING,
+            "lifecycle authority is missing",
+        )
     if not isinstance(
         authority,
         (
@@ -1042,55 +1206,112 @@ def _authorize(
     if validation:
         return result(
             CloseDisposition.HOLD if validation.evidence_gap else CloseDisposition.DENY,
-            validation.reason,
+            validation.reason_code,
+            validation.message,
         )
     if intent is CloseIntent.CI_CLEANUP:
         if not isinstance(authority, CIAuthority):
-            return result(CloseDisposition.DENY, "wrong authority type")
+            return result(
+                CloseDisposition.DENY, CloseReasonCode.AUTHORITY_WRONG_TYPE, "wrong authority type"
+            )
         if (authority.repository, authority.run, authority.attempt) != (
             identity.owner,
             identity.run,
             identity.attempt,
         ):
-            return result(CloseDisposition.DENY, "CI lifecycle authority disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "CI lifecycle authority disagrees",
+            )
         if type(authority.run) is not int or type(authority.attempt) is not int:
-            return result(CloseDisposition.DENY, "CI lifecycle numbers are not canonical integers")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_INVALID,
+                "CI lifecycle numbers are not canonical integers",
+            )
         if authority.run_state is not RunState.TERMINAL:
-            return result(CloseDisposition.DENY, "owning CI run is live or unknown")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_INVALID,
+                "owning CI run is live or unknown",
+            )
         if authority.consumer_state is not ConsumerState.FINISHED:
-            return result(CloseDisposition.DENY, "CI consumers are active or unknown")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_INVALID,
+                "CI consumers are active or unknown",
+            )
     elif intent is CloseIntent.STAGING_RETIREMENT:
         if not isinstance(authority, StagingRetirementAuthority) or (
             authority.repository,
             authority.release,
         ) != (identity.owner, identity.release):
-            return result(CloseDisposition.DENY, "staging lifecycle authority disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "staging lifecycle authority disagrees",
+            )
         if not _nonempty(authority.authorization_reference):
-            return result(CloseDisposition.DENY, "staging authority has no reference")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_INVALID,
+                "staging authority has no reference",
+            )
         if (
             attestation
             and attestation.authorization_reference != candidates.creation_authorization_reference
         ):
-            return result(CloseDisposition.DENY, "staging authorities disagree")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "staging authorities disagree",
+            )
     elif intent is CloseIntent.PRODUCTION_RETIREMENT:
         if not isinstance(authority, ProductionRetirementAuthority) or (
             authority.repository,
             authority.release,
         ) != (identity.owner, identity.release):
-            return result(CloseDisposition.DENY, "production lifecycle authority disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "production lifecycle authority disagrees",
+            )
         if producer_environment != authority.environment:
-            return result(CloseDisposition.DENY, "production environment authority disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "production environment authority disagrees",
+            )
         if not _nonempty(authority.authorization_reference):
-            return result(CloseDisposition.DENY, "production authority has no reference")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_INVALID,
+                "production authority has no reference",
+            )
     elif intent is CloseIntent.CREATOR_ROLLBACK:
         if not isinstance(authority, CreatorRollbackAuthority):
-            return result(CloseDisposition.DENY, "wrong authority type")
+            return result(
+                CloseDisposition.DENY, CloseReasonCode.AUTHORITY_WRONG_TYPE, "wrong authority type"
+            )
         if authority.signer_owner != subject.owner:
-            return result(CloseDisposition.DENY, "creator signer owner disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "creator signer owner disagrees",
+            )
         if authority.group_identity_digest != canonical_group_identity_digest(population):
-            return result(CloseDisposition.DENY, "creator group population disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "creator group population disagrees",
+            )
         if authority.operation_id != candidates.operation_id:
-            return result(CloseDisposition.DENY, "creator operation authority disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "creator operation authority disagrees",
+            )
         if (
             authority.repository,
             authority.workload_class,
@@ -1106,7 +1327,11 @@ def _authorize(
             identity.release,
             identity.expires,
         ):
-            return result(CloseDisposition.DENY, "creator lifecycle authority disagrees")
+            return result(
+                CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+                "creator lifecycle authority disagrees",
+            )
         expected_creation_authority = candidates.creation_authorization_reference
         if identity.workload_class in {"staging-payload", "prod-payload"}:
             if not _nonempty(
@@ -1115,11 +1340,13 @@ def _authorize(
             ):
                 return result(
                     CloseDisposition.DENY,
+                    CloseReasonCode.AUTHORITY_INVALID,
                     "payload creator rollback lacks original creation authorization",
                 )
             if authority.creation_authorization_reference != expected_creation_authority:
                 return result(
                     CloseDisposition.DENY,
+                    CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
                     "creator rollback creation authorization disagrees",
                 )
             if attestation and (
@@ -1127,6 +1354,7 @@ def _authorize(
             ):
                 return result(
                     CloseDisposition.DENY,
+                    CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
                     "creator rollback attestation authorization disagrees",
                 )
         elif (
@@ -1135,11 +1363,12 @@ def _authorize(
         ):
             return result(
                 CloseDisposition.DENY,
+                CloseReasonCode.AUTHORITY_INVALID,
                 "CI creator rollback carries payload authorization",
             )
     else:  # pragma: no cover
         raise AssertionError(f"unhandled close intent {intent!r}")
-    return result(CloseDisposition.ALLOW, "authorized")
+    return result(CloseDisposition.ALLOW, CloseReasonCode.AUTHORIZATION_SUCCEEDED, "authorized")
 
 
 def evaluate_close(
@@ -1169,13 +1398,16 @@ def evaluate_close(
         raise ValueError("candidate count must be a canonical nonnegative integer")
     identity, reason = _classified(population)
     if identity is None:
+        if reason is None:  # pragma: no cover - closed internal result type
+            raise AssertionError("classification failure requires a reason")
         return _decision(
             CloseDisposition.HOLD,
             intent,
             subject,
             population,
             candidates,
-            reason,
+            reason.reason_code,
+            reason.message,
             evaluated_at=evaluated_at,
         )
     denial = _class_denial(intent, identity.workload_class)
@@ -1186,7 +1418,8 @@ def evaluate_close(
             subject,
             population,
             candidates,
-            denial,
+            denial.reason_code,
+            denial.message,
             evaluated_at=evaluated_at,
             identity=identity,
         )
@@ -1231,6 +1464,7 @@ def evaluate_close(
             subject,
             population,
             candidates,
+            CloseReasonCode.CANDIDATE_INCOMPLETE_OR_NON_UNIQUE,
             "deployment attribution population is incomplete or not unique",
             evaluated_at=evaluated_at,
             identity=identity,
@@ -1242,6 +1476,7 @@ def evaluate_close(
             subject,
             population,
             candidates,
+            CloseReasonCode.CHAIN_EVIDENCE_MISSING,
             "independent pre-close chain evidence is missing",
             evaluated_at=evaluated_at,
             identity=identity,
@@ -1270,6 +1505,7 @@ def evaluate_close(
                 subject,
                 population,
                 candidates,
+                CloseReasonCode.CHAIN_EVIDENCE_WRONG_POPULATION,
                 "pre-close evidence is bound to another population",
                 **base,
             )
@@ -1300,6 +1536,7 @@ def evaluate_close(
                 subject,
                 population,
                 candidates,
+                CloseReasonCode.CHAIN_EVIDENCE_TRUST_PATHS_INCOMPLETE,
                 "pre-close evidence lacks two independent finalized trust paths",
                 **base,
             )
@@ -1318,6 +1555,7 @@ def evaluate_close(
                 subject,
                 population,
                 candidates,
+                CloseReasonCode.CHAIN_EVIDENCE_DIGEST_OR_INTERVAL_INCOMPLETE,
                 "pre-close evidence lacks digest or interval",
                 **base,
             )
@@ -1338,6 +1576,7 @@ def evaluate_close(
                 subject,
                 population,
                 candidates,
+                CloseReasonCode.CHAIN_POPULATION_INCOMPLETE_OR_MISMATCHED,
                 "deployment or group population is incomplete or mismatched",
                 **base,
             )
@@ -1360,6 +1599,7 @@ def evaluate_close(
                 subject,
                 population,
                 candidates,
+                CloseReasonCode.CHAIN_LEASE_POPULATION_INCOMPLETE,
                 "lease population is incomplete, empty, or vacuous",
                 **base,
             )
@@ -1370,6 +1610,7 @@ def evaluate_close(
                 subject,
                 population,
                 candidates,
+                CloseReasonCode.CHAIN_SOURCES_DISAGREE,
                 "two complete chain sources do not agree",
                 **base,
             )
@@ -1383,6 +1624,7 @@ def evaluate_close(
                 subject,
                 population,
                 candidates,
+                CloseReasonCode.PRODUCER_UNAUTHENTICATED,
                 "producer is unauthenticated",
                 evaluated_at=evaluated_at,
                 identity=identity,
@@ -1405,7 +1647,8 @@ def evaluate_close(
                     subject,
                     population,
                     candidates,
-                    reason,
+                    reason.reason_code,
+                    reason.message,
                     evaluated_at=evaluated_at,
                     identity=identity,
                     authority=authority,
@@ -1424,7 +1667,8 @@ def evaluate_close(
                     subject,
                     population,
                     candidates,
-                    reason,
+                    reason.reason_code,
+                    reason.message,
                     evaluated_at=evaluated_at,
                     identity=identity,
                     authority=authority,
@@ -1450,7 +1694,8 @@ def evaluate_close(
                     subject,
                     population,
                     candidates,
-                    reason,
+                    reason.reason_code,
+                    reason.message,
                     evaluated_at=evaluated_at,
                     identity=identity,
                     authority=authority,
@@ -1486,6 +1731,7 @@ __all__ = [
     "CloseDecision",
     "CloseDisposition",
     "CloseIntent",
+    "CloseReasonCode",
     "ConsumerState",
     "CreationAttestation",
     "CreationBindingMode",
