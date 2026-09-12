@@ -408,6 +408,7 @@ def test_ci_allow_returns_subject_population_authority_and_evidence_bindings():
     assert decision.chain_id == "akashnet-2"
     assert decision.proof_mode is ChainProofMode.EXACT_FINALIZED_HEIGHT
     assert decision.finalized_height == 20_000_000
+    assert decision.policy_version == CLOSE_POLICY_VERSION == 2
 
 
 @pytest.mark.parametrize("workload_class", ["staging-payload", "prod-payload"])
@@ -1215,13 +1216,23 @@ def test_close_reason_code_population_is_stable_and_grouped():
 
 
 def test_close_decision_rejects_untyped_codes_and_disposition_mismatches():
-    with pytest.raises(ValueError, match="typed reason code"):
+    with pytest.raises(ValueError, match="typed identity, disposition, and reason"):
         CloseDecision(
             CloseDisposition.DENY,
             CloseIntent.CI_CLEANUP,
             SUBJECT,
             "lifecycle_authority.invalid",
             "diagnostic",
+        )
+
+    with pytest.raises(ValueError, match="policy version"):
+        CloseDecision(
+            CloseDisposition.DENY,
+            CloseIntent.CI_CLEANUP,
+            SUBJECT,
+            CloseReasonCode.AUTHORITY_INVALID,
+            "diagnostic",
+            policy_version=1,
         )
     with pytest.raises(ValueError, match="reason code and disposition"):
         CloseDecision(

@@ -504,10 +504,14 @@ class CloseDecision:
     def __post_init__(self) -> None:
         if (
             not isinstance(self.disposition, CloseDisposition)
+            or not isinstance(self.intent, CloseIntent)
+            or not isinstance(self.subject, DeploymentKey)
             or not isinstance(self.reason_code, CloseReasonCode)
             or not _nonempty(self.message)
         ):
-            raise ValueError("close decision requires a typed reason code and human message")
+            raise ValueError("close decision requires typed identity, disposition, and reason")
+        if type(self.policy_version) is not int or self.policy_version != CLOSE_POLICY_VERSION:
+            raise ValueError("close decision policy version does not match this contract")
         expected_disposition = _CLOSE_REASON_DISPOSITIONS.get(self.reason_code)
         if expected_disposition is not self.disposition:
             raise ValueError("close reason code and disposition must agree")
