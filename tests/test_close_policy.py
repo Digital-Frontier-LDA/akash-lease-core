@@ -640,6 +640,55 @@ def test_production_authority_effect_mutations_refuse(mutation):
     assert not decision.allowed
 
 
+@pytest.mark.parametrize(
+    ("mutation", "expected_disposition", "expected_reason_code"),
+    [
+        (
+            {"approval_verification_status": VerificationStatus.UNKNOWN},
+            CloseDisposition.HOLD,
+            CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+        ),
+        (
+            {"approval_verification_status": VerificationStatus.FAILED},
+            CloseDisposition.DENY,
+            CloseReasonCode.AUTHORITY_INVALID,
+        ),
+        (
+            {"single_use_verification": VerificationStatus.UNKNOWN},
+            CloseDisposition.HOLD,
+            CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+        ),
+        (
+            {"single_use_verification": VerificationStatus.FAILED},
+            CloseDisposition.DENY,
+            CloseReasonCode.AUTHORITY_INVALID,
+        ),
+        (
+            {"authorization_uniqueness_status": UniquenessStatus.UNKNOWN},
+            CloseDisposition.HOLD,
+            CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+        ),
+        (
+            {"authorization_uniqueness_status": UniquenessStatus.REUSED},
+            CloseDisposition.HOLD,
+            CloseReasonCode.AUTHORITY_REPLAYED,
+        ),
+    ],
+)
+def test_production_unknown_failed_and_replayed_authority_are_distinct(
+    mutation, expected_disposition, expected_reason_code
+):
+    population = _population("prod-payload")
+    decision = _evaluate(
+        population,
+        CloseIntent.PRODUCTION_RETIREMENT,
+        _payload_authority("prod", **mutation),
+    )
+
+    assert decision.disposition is expected_disposition
+    assert decision.reason_code is expected_reason_code
+
+
 def test_single_operator_and_automated_request_production_shapes_allow():
     population = _population("prod-payload")
     automated = _payload_authority("prod")
@@ -1157,6 +1206,7 @@ def test_close_reason_code_population_is_stable_and_grouped():
         "chain_evidence.sources_disagree",
         "lifecycle_authority.missing",
         "lifecycle_authority.evidence_incomplete",
+        "lifecycle_authority.replayed",
         "lifecycle_authority.invalid",
         "lifecycle_authority.wrong_type",
         "lifecycle_authority.identity_disagreement",
@@ -1164,7 +1214,7 @@ def test_close_reason_code_population_is_stable_and_grouped():
     )
 
 
-def test_close_decision_rejects_untyped_codes_and_success_mismatches():
+def test_close_decision_rejects_untyped_codes_and_disposition_mismatches():
     with pytest.raises(ValueError, match="typed reason code"):
         CloseDecision(
             CloseDisposition.DENY,
@@ -1173,7 +1223,7 @@ def test_close_decision_rejects_untyped_codes_and_success_mismatches():
             "lifecycle_authority.invalid",
             "diagnostic",
         )
-    with pytest.raises(ValueError, match="success code"):
+    with pytest.raises(ValueError, match="reason code and disposition"):
         CloseDecision(
             CloseDisposition.DENY,
             CloseIntent.CI_CLEANUP,
@@ -1181,6 +1231,69 @@ def test_close_decision_rejects_untyped_codes_and_success_mismatches():
             CloseReasonCode.AUTHORIZATION_SUCCEEDED,
             "diagnostic",
         )
+
+    with pytest.raises(ValueError, match="reason code and disposition"):
+        CloseDecision(
+            CloseDisposition.DENY,
+            CloseIntent.CI_CLEANUP,
+            SUBJECT,
+            CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+            "diagnostic",
+        )
+
+
+def test_every_reason_code_has_one_stable_disposition():
+    hold_codes = {
+        CloseReasonCode.CLASSIFICATION_INCOMPLETE,
+        CloseReasonCode.CLASSIFICATION_HELD,
+        CloseReasonCode.CLASSIFICATION_COUNT_MISMATCH,
+        CloseReasonCode.CLASSIFICATION_LIFECYCLE_MIXED,
+        CloseReasonCode.CANDIDATE_INCOMPLETE_OR_NON_UNIQUE,
+        CloseReasonCode.PRODUCER_UNAUTHENTICATED,
+        CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+        CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID,
+        CloseReasonCode.CHAIN_EVIDENCE_MISSING,
+        CloseReasonCode.CHAIN_EVIDENCE_WRONG_POPULATION,
+        CloseReasonCode.CHAIN_EVIDENCE_TRUST_PATHS_INCOMPLETE,
+        CloseReasonCode.CHAIN_EVIDENCE_DIGEST_OR_INTERVAL_INCOMPLETE,
+        CloseReasonCode.CHAIN_POPULATION_INCOMPLETE_OR_MISMATCHED,
+        CloseReasonCode.CHAIN_LEASE_POPULATION_INCOMPLETE,
+        CloseReasonCode.CHAIN_SOURCES_DISAGREE,
+        CloseReasonCode.AUTHORITY_MISSING,
+        CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+        CloseReasonCode.AUTHORITY_REPLAYED,
+    }
+    deny_codes = {
+        CloseReasonCode.CLASS_POLICY_FORBIDS_INTENT,
+        CloseReasonCode.AUTHORITY_INVALID,
+        CloseReasonCode.AUTHORITY_WRONG_TYPE,
+        CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+    }
+    allow_codes = {CloseReasonCode.AUTHORIZATION_SUCCEEDED}
+    expected = {
+        **dict.fromkeys(hold_codes, CloseDisposition.HOLD),
+        **dict.fromkeys(deny_codes, CloseDisposition.DENY),
+        **dict.fromkeys(allow_codes, CloseDisposition.ALLOW),
+    }
+
+    assert set(expected) == set(CloseReasonCode)
+    for reason_code, disposition in expected.items():
+        CloseDecision(
+            disposition,
+            CloseIntent.CI_CLEANUP,
+            SUBJECT,
+            reason_code,
+            "diagnostic",
+        )
+        for wrong_disposition in set(CloseDisposition) - {disposition}:
+            with pytest.raises(ValueError, match="reason code and disposition"):
+                CloseDecision(
+                    wrong_disposition,
+                    CloseIntent.CI_CLEANUP,
+                    SUBJECT,
+                    reason_code,
+                    "diagnostic",
+                )
 
 
 def test_every_reason_code_is_reached_by_a_real_policy_path():
@@ -1198,7 +1311,7 @@ def test_every_reason_code_is_reached_by_a_real_policy_path():
             evaluated_at=NOW,
         )
 
-    reached = {
+    reached = [
         classify_only(
             replace(
                 population,
@@ -1299,6 +1412,14 @@ def test_every_reason_code_is_reached_by_a_real_policy_path():
             _ci_authority(source=""),
         ).reason_code,
         _evaluate(
+            _population("prod-payload"),
+            CloseIntent.PRODUCTION_RETIREMENT,
+            _payload_authority(
+                "prod",
+                authorization_uniqueness_status=UniquenessStatus.REUSED,
+            ),
+        ).reason_code,
+        _evaluate(
             population,
             CloseIntent.CI_CLEANUP,
             _ci_authority(run_state=RunState.LIVE),
@@ -1314,9 +1435,34 @@ def test_every_reason_code_is_reached_by_a_real_policy_path():
             _ci_authority(run=999),
         ).reason_code,
         _evaluate(population, CloseIntent.CI_CLEANUP, _ci_authority()).reason_code,
-    }
+    ]
 
-    assert reached == set(CloseReasonCode)
+    assert reached == [
+        CloseReasonCode.CLASSIFICATION_INCOMPLETE,
+        CloseReasonCode.CLASSIFICATION_HELD,
+        CloseReasonCode.CLASSIFICATION_COUNT_MISMATCH,
+        CloseReasonCode.CLASSIFICATION_LIFECYCLE_MIXED,
+        CloseReasonCode.CLASS_POLICY_FORBIDS_INTENT,
+        CloseReasonCode.CANDIDATE_INCOMPLETE_OR_NON_UNIQUE,
+        CloseReasonCode.PRODUCER_UNAUTHENTICATED,
+        CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID,
+        CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID,
+        CloseReasonCode.CHAIN_EVIDENCE_MISSING,
+        CloseReasonCode.CHAIN_EVIDENCE_WRONG_POPULATION,
+        CloseReasonCode.CHAIN_EVIDENCE_TRUST_PATHS_INCOMPLETE,
+        CloseReasonCode.CHAIN_EVIDENCE_DIGEST_OR_INTERVAL_INCOMPLETE,
+        CloseReasonCode.CHAIN_POPULATION_INCOMPLETE_OR_MISMATCHED,
+        CloseReasonCode.CHAIN_LEASE_POPULATION_INCOMPLETE,
+        CloseReasonCode.CHAIN_SOURCES_DISAGREE,
+        CloseReasonCode.AUTHORITY_MISSING,
+        CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+        CloseReasonCode.AUTHORITY_REPLAYED,
+        CloseReasonCode.AUTHORITY_INVALID,
+        CloseReasonCode.AUTHORITY_WRONG_TYPE,
+        CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT,
+        CloseReasonCode.AUTHORIZATION_SUCCEEDED,
+    ]
+    assert set(reached) == set(CloseReasonCode)
 
 
 def test_every_close_decision_call_site_supplies_a_machine_code_and_message():
@@ -1347,7 +1493,7 @@ def test_every_close_decision_call_site_supplies_a_machine_code_and_message():
 
     assert len(direct_calls) == 15
     assert len(result_calls) == 23
-    assert len(reason_returns) == 72
+    assert len(reason_returns) == 76
     assert all(len(call.args) >= 7 for call in direct_calls)
     assert all(len(call.args) == 3 for call in result_calls)
 

@@ -53,7 +53,7 @@ logic.
 The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.11.1
+akash-lease-core main   0.13.0
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -65,7 +65,7 @@ docstring discussing older behaviour. #33 read those as live pins and reported a
 range inside one consumer; the resolved skew is a single version. A naive grep counts prose as
 configuration, and here it inflated the finding by two versions.
 
-⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.11.1` contains behaviour
+⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.13.0` contains behaviour
 changes that matter has not been determined. Upgrading consumers onto a version nobody has
 diffed is how a shared library becomes an incident — establish the intended pin contract
 (#32) first.
@@ -361,11 +361,13 @@ uniqueness, and verification guarantees. A generic
 `force` input does not exist. Unknown, incomplete, malformed, or mixed group
 populations are held.
 `CloseDecision.reason_code` is the stable machine contract, grouped by the
-policy stage which stopped evaluation. Adapters branch on that enum rather
+policy stage which stopped evaluation. Each code has one fixed `ALLOW`, `HOLD`,
+or `DENY` disposition; inconsistent pairs are rejected. Adapters branch on that enum rather
 than presentation text. `CloseDecision.message` remains a human diagnostic;
 the compatibility `reason` property returns the same message, but its wording
 may change. Close policy version 2 makes the code mandatory on every result
-and rejects a success code paired with any disposition other than `ALLOW`.
+and gives replayed production authorization a distinct held reason from missing
+or failed verification evidence.
 Every decision receives a deterministic `evaluated_at` value and checks it
 against the observation and validity intervals on chain, authority, signer, and
 attestation-verification evidence. Out-of-window evidence is held. Callers also
@@ -499,7 +501,7 @@ assert decision.disposition is CloseDisposition.ALLOW
 assert decision.reason_code is CloseReasonCode.AUTHORIZATION_SUCCEEDED
 ```
 
-Reviewed legacy retirement is intentionally absent from the public v0.12 API.
+Reviewed legacy retirement is intentionally absent from the public v0.13 API.
 Unknown and legacy identity populations hold; exposing an authority variant
 that can never allow would invite consumers to mistake representation for a
 working retirement path.

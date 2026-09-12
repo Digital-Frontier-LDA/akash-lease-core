@@ -59,10 +59,38 @@ class CloseReasonCode(str, Enum):
     CHAIN_SOURCES_DISAGREE = "chain_evidence.sources_disagree"
     AUTHORITY_MISSING = "lifecycle_authority.missing"
     AUTHORITY_EVIDENCE_INCOMPLETE = "lifecycle_authority.evidence_incomplete"
+    AUTHORITY_REPLAYED = "lifecycle_authority.replayed"
     AUTHORITY_INVALID = "lifecycle_authority.invalid"
     AUTHORITY_WRONG_TYPE = "lifecycle_authority.wrong_type"
     AUTHORITY_IDENTITY_DISAGREEMENT = "lifecycle_authority.identity_disagreement"
     AUTHORIZATION_SUCCEEDED = "authorization.succeeded"
+
+
+_CLOSE_REASON_DISPOSITIONS = {
+    CloseReasonCode.CLASSIFICATION_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CLASSIFICATION_HELD: CloseDisposition.HOLD,
+    CloseReasonCode.CLASSIFICATION_COUNT_MISMATCH: CloseDisposition.HOLD,
+    CloseReasonCode.CLASSIFICATION_LIFECYCLE_MIXED: CloseDisposition.HOLD,
+    CloseReasonCode.CANDIDATE_INCOMPLETE_OR_NON_UNIQUE: CloseDisposition.HOLD,
+    CloseReasonCode.CLASS_POLICY_FORBIDS_INTENT: CloseDisposition.DENY,
+    CloseReasonCode.PRODUCER_UNAUTHENTICATED: CloseDisposition.HOLD,
+    CloseReasonCode.PRODUCER_SHARED_EVIDENCE_INVALID: CloseDisposition.HOLD,
+    CloseReasonCode.PRODUCER_ISOLATED_EVIDENCE_INVALID: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_MISSING: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_WRONG_POPULATION: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_TRUST_PATHS_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_EVIDENCE_DIGEST_OR_INTERVAL_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_POPULATION_INCOMPLETE_OR_MISMATCHED: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_LEASE_POPULATION_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.CHAIN_SOURCES_DISAGREE: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_MISSING: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_REPLAYED: CloseDisposition.HOLD,
+    CloseReasonCode.AUTHORITY_INVALID: CloseDisposition.DENY,
+    CloseReasonCode.AUTHORITY_WRONG_TYPE: CloseDisposition.DENY,
+    CloseReasonCode.AUTHORITY_IDENTITY_DISAGREEMENT: CloseDisposition.DENY,
+    CloseReasonCode.AUTHORIZATION_SUCCEEDED: CloseDisposition.ALLOW,
+}
 
 
 class SourceAgreement(str, Enum):
@@ -162,8 +190,11 @@ class _Reason:
     message: str
 
 
-def _authority_hold(message: str) -> AuthorityValidation:
-    return AuthorityValidation(CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE, message, True)
+def _authority_hold(
+    message: str,
+    reason_code: CloseReasonCode = CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE,
+) -> AuthorityValidation:
+    return AuthorityValidation(reason_code, message, True)
 
 
 def _authority_deny(message: str) -> AuthorityValidation:
@@ -471,11 +502,15 @@ class CloseDecision:
     policy_version: int = CLOSE_POLICY_VERSION
 
     def __post_init__(self) -> None:
-        if not isinstance(self.reason_code, CloseReasonCode) or not _nonempty(self.message):
+        if (
+            not isinstance(self.disposition, CloseDisposition)
+            or not isinstance(self.reason_code, CloseReasonCode)
+            or not _nonempty(self.message)
+        ):
             raise ValueError("close decision requires a typed reason code and human message")
-        succeeded = self.reason_code is CloseReasonCode.AUTHORIZATION_SUCCEEDED
-        if succeeded != (self.disposition is CloseDisposition.ALLOW):
-            raise ValueError("authorization success code and allow disposition must agree")
+        expected_disposition = _CLOSE_REASON_DISPOSITIONS.get(self.reason_code)
+        if expected_disposition is not self.disposition:
+            raise ValueError("close reason code and disposition must agree")
 
     @property
     def allowed(self) -> bool:
@@ -969,13 +1004,24 @@ def _authority_reason(
         ):
             return _authority_deny("production approval verification is bound to another action")
         if authority.approval_verification_status is not VerificationStatus.VERIFIED:
-            return _authority_deny("production approval is unverified")
+            if authority.approval_verification_status is VerificationStatus.UNKNOWN:
+                return _authority_hold("production approval is unverified")
+            return _authority_deny("production approval verification failed")
         if authority.single_use_verification is not VerificationStatus.VERIFIED:
-            return _authority_deny("production single-use policy is unverified")
+            if authority.single_use_verification is VerificationStatus.UNKNOWN:
+                return _authority_hold("production single-use policy is unverified")
+            return _authority_deny("production single-use verification failed")
         if authority.single_use_authorization_id != authority.authorization_id:
             return _authority_deny("production single-use proof is bound to another authorization")
+        if authority.authorization_uniqueness_status is UniquenessStatus.UNKNOWN:
+            return _authority_hold("production authorization uniqueness is unverified")
+        if authority.authorization_uniqueness_status is UniquenessStatus.REUSED:
+            return _authority_hold(
+                "production authorization was replayed",
+                CloseReasonCode.AUTHORITY_REPLAYED,
+            )
         if authority.authorization_uniqueness_status is not UniquenessStatus.UNIQUE:
-            return _authority_deny("production authorization is reused or unverified")
+            return _authority_deny("production authorization uniqueness is invalid")
         if authority.unique_authorization_id != authority.authorization_id:
             return _authority_deny("production uniqueness proof is bound to another authorization")
         if type(authority.issued_at) is not int or authority.issued_at <= 0:
