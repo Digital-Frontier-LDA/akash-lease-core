@@ -113,6 +113,7 @@ from .close_policy import (
     CloseDecision,
     CloseDisposition,
     CloseIntent,
+    CloseReasonCode,
     ConsumerState,
     CreationAttestation,
     CreationBindingMode,
@@ -338,6 +339,7 @@ __all__ = [
     "CloseDecision",
     "CloseDisposition",
     "CloseIntent",
+    "CloseReasonCode",
     "ConsumerState",
     "CreationAttestation",
     "CreationBindingMode",
@@ -454,7 +456,7 @@ __all__ = [
     "select_batch",
 ]
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants

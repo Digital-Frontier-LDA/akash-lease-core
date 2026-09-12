@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import inspect
 from dataclasses import replace
 
@@ -7,6 +8,7 @@ import pytest
 
 import akash_lease_core.close_policy as policy_module
 from akash_lease_core import (
+    CLOSE_POLICY_VERSION,
     EMPTY_POPULATION_DIGEST,
     AttestationVerification,
     BypassUseStatus,
@@ -18,6 +20,7 @@ from akash_lease_core import (
     CloseDecision,
     CloseDisposition,
     CloseIntent,
+    CloseReasonCode,
     ConsumerState,
     CreationAttestation,
     CreationBindingMode,
@@ -1118,6 +1121,7 @@ def test_policy_call_site_reaches_authorizer_once(monkeypatch):
         CloseDisposition.DENY,
         CloseIntent.CI_CLEANUP,
         SUBJECT,
+        CloseReasonCode.AUTHORITY_INVALID,
         "planted call-site effect",
     )
     calls = []
@@ -1130,3 +1134,288 @@ def test_policy_call_site_reaches_authorizer_once(monkeypatch):
     decision = _evaluate(_population("ci-runner"), CloseIntent.CI_CLEANUP, _ci_authority())
     assert decision is planted
     assert len(calls) == 1
+
+
+def test_close_reason_code_population_is_stable_and_grouped():
+    assert CLOSE_POLICY_VERSION == 2
+    assert tuple(reason.value for reason in CloseReasonCode) == (
+        "classification.incomplete",
+        "classification.held",
+        "classification.count_mismatch",
+        "classification.lifecycle_mixed",
+        "candidate.incomplete_or_non_unique",
+        "class_policy.forbids_intent",
+        "producer_authentication.missing",
+        "producer_authentication.shared_invalid",
+        "producer_authentication.isolated_invalid",
+        "chain_evidence.missing",
+        "chain_evidence.wrong_population",
+        "chain_evidence.trust_paths_incomplete",
+        "chain_evidence.digest_or_interval_incomplete",
+        "chain_evidence.population_mismatch",
+        "chain_evidence.lease_population_incomplete",
+        "chain_evidence.sources_disagree",
+        "lifecycle_authority.missing",
+        "lifecycle_authority.evidence_incomplete",
+        "lifecycle_authority.invalid",
+        "lifecycle_authority.wrong_type",
+        "lifecycle_authority.identity_disagreement",
+        "authorization.succeeded",
+    )
+
+
+def test_close_decision_rejects_untyped_codes_and_success_mismatches():
+    with pytest.raises(ValueError, match="typed reason code"):
+        CloseDecision(
+            CloseDisposition.DENY,
+            CloseIntent.CI_CLEANUP,
+            SUBJECT,
+            "lifecycle_authority.invalid",
+            "diagnostic",
+        )
+    with pytest.raises(ValueError, match="success code"):
+        CloseDecision(
+            CloseDisposition.DENY,
+            CloseIntent.CI_CLEANUP,
+            SUBJECT,
+            CloseReasonCode.AUTHORIZATION_SUCCEEDED,
+            "diagnostic",
+        )
+
+
+def test_every_reason_code_is_reached_by_a_real_policy_path():
+    population = _population("ci-runner")
+
+    def classify_only(mutated_population):
+        return evaluate_close(
+            subject=SUBJECT,
+            population=mutated_population,
+            candidates=_candidates(population),
+            intent=CloseIntent.CI_CLEANUP,
+            authority=None,
+            chain_evidence=None,
+            producer_authentication=None,
+            evaluated_at=NOW,
+        )
+
+    reached = {
+        classify_only(
+            replace(
+                population,
+                completeness=PopulationCompleteness.INCOMPLETE,
+            )
+        ).reason_code,
+        classify_only(replace(population, held=True)).reason_code,
+        classify_only(replace(population, parsed_count=1)).reason_code,
+        classify_only(
+            replace(
+                population,
+                identities=(
+                    population.identities[0],
+                    replace(population.identities[1], attempt=3),
+                ),
+            )
+        ).reason_code,
+        _evaluate(
+            _population("prod-payload"),
+            CloseIntent.CI_CLEANUP,
+            None,
+            chain_evidence=None,
+            producer_authentication=None,
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            candidates=_candidates(population, count=0),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            producer_authentication=None,
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            producer_authentication=_shared(
+                population,
+                claim_updates={"subject": OTHER_SUBJECT},
+            ),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            producer_authentication=_isolated(operation_id="other"),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            chain_evidence=None,
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            chain_evidence=_chain(population, subject=OTHER_SUBJECT),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            chain_evidence=_chain(population, source_b="rpc-a.example"),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            chain_evidence=_chain(population, evidence_digest=""),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            chain_evidence=_chain(population, deployment_count=0),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            chain_evidence=_chain(population, lease_count=0),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(),
+            chain_evidence=_chain(population, agreement=SourceAgreement.DISAGREEING),
+        ).reason_code,
+        _evaluate(population, CloseIntent.CI_CLEANUP, None).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(source=""),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(run_state=RunState.LIVE),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _payload_authority("staging"),
+        ).reason_code,
+        _evaluate(
+            population,
+            CloseIntent.CI_CLEANUP,
+            _ci_authority(run=999),
+        ).reason_code,
+        _evaluate(population, CloseIntent.CI_CLEANUP, _ci_authority()).reason_code,
+    }
+
+    assert reached == set(CloseReasonCode)
+
+
+def test_every_close_decision_call_site_supplies_a_machine_code_and_message():
+    tree = ast.parse(inspect.getsource(policy_module))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    direct_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_decision"
+    ]
+    result_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "result"
+    ]
+    reason_returns = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Return)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id in {"_Reason", "_authority_hold", "_authority_deny"}
+    ]
+
+    assert len(direct_calls) == 15
+    assert len(result_calls) == 23
+    assert len(reason_returns) == 72
+    assert all(len(call.args) >= 7 for call in direct_calls)
+    assert all(len(call.args) == 3 for call in result_calls)
+
+    def returned_values(function_name):
+        return [
+            node.value
+            for node in ast.walk(functions[function_name])
+            if isinstance(node, ast.Return)
+        ]
+
+    def is_call(value, *names):
+        return (
+            isinstance(value, ast.Call)
+            and isinstance(value.func, ast.Name)
+            and value.func.id in names
+        )
+
+    def is_none(value):
+        return isinstance(value, ast.Constant) and value.value is None
+
+    for function_name in ("_shared_reason", "_isolated_reason", "_class_denial"):
+        assert all(
+            is_none(value) or is_call(value, "_Reason") for value in returned_values(function_name)
+        )
+    assert all(
+        is_none(value) or is_call(value, "_authority_hold", "_authority_deny")
+        for value in returned_values("_authority_reason")
+    )
+    assert all(
+        isinstance(value, ast.Tuple)
+        and (is_none(value.elts[1]) or is_call(value.elts[1], "_Reason"))
+        for value in returned_values("_classified")
+    )
+
+
+def test_message_mutation_cannot_change_machine_adapter_behavior(monkeypatch):
+    def adapter_action(decision):
+        if decision.reason_code is CloseReasonCode.AUTHORIZATION_SUCCEEDED:
+            return "close"
+        if decision.reason_code is CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE:
+            return "retry-evidence"
+        return "refuse"
+
+    population = _population("ci-runner")
+    allowed = _evaluate(population, CloseIntent.CI_CLEANUP, _ci_authority())
+    held = _evaluate(
+        population,
+        CloseIntent.CI_CLEANUP,
+        _ci_authority(source=""),
+    )
+    mutated = replace(held, message="presentation text changed completely")
+
+    assert adapter_action(allowed) == "close"
+    assert adapter_action(held) == adapter_action(mutated) == "retry-evidence"
+    assert held.reason_code is CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE
+
+    original = policy_module._authority_hold
+
+    def changed_message(message):
+        result = original(message)
+        return replace(result, message="another diagnostic")
+
+    monkeypatch.setattr(policy_module, "_authority_hold", changed_message)
+    changed = _evaluate(
+        population,
+        CloseIntent.CI_CLEANUP,
+        _ci_authority(source=""),
+    )
+    assert changed.disposition is CloseDisposition.HOLD
+    assert changed.reason_code is CloseReasonCode.AUTHORITY_EVIDENCE_INCOMPLETE
+    assert adapter_action(changed) == "retry-evidence"

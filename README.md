@@ -360,6 +360,12 @@ environment bypass evidence and must provide equivalent separation,
 uniqueness, and verification guarantees. A generic
 `force` input does not exist. Unknown, incomplete, malformed, or mixed group
 populations are held.
+`CloseDecision.reason_code` is the stable machine contract, grouped by the
+policy stage which stopped evaluation. Adapters branch on that enum rather
+than presentation text. `CloseDecision.message` remains a human diagnostic;
+the compatibility `reason` property returns the same message, but its wording
+may change. Close policy version 2 makes the code mandatory on every result
+and rejects a success code paired with any disposition other than `ALLOW`.
 Every decision receives a deterministic `evaluated_at` value and checks it
 against the observation and validity intervals on chain, authority, signer, and
 attestation-verification evidence. Out-of-window evidence is held. Callers also
@@ -396,6 +402,7 @@ from akash_lease_core import (
     ChainProofMode,
     CloseDisposition,
     CloseIntent,
+    CloseReasonCode,
     ConsumerState,
     LeasePopulationCompleteness,
     IsolatedSignerEvidence,
@@ -489,6 +496,7 @@ decision = evaluate_close(
     evaluated_at=1757500000,
 )
 assert decision.disposition is CloseDisposition.ALLOW
+assert decision.reason_code is CloseReasonCode.AUTHORIZATION_SUCCEEDED
 ```
 
 Reviewed legacy retirement is intentionally absent from the public v0.12 API.
