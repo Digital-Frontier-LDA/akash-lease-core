@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -42,8 +45,8 @@ jobs:
           python-version: "3.11"
       - name: Install ruff (pinned to match the consuming repos)
         run: pip install ruff==0.15.20
-      - run: ruff check src tests
-      - run: ruff format --check src tests
+      - run: ruff check src tests tools
+      - run: ruff format --check src tests tools
 
   sans-io-guard:
     # The whole value of this package is that it has no I/O and no deps.
