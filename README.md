@@ -264,6 +264,72 @@ monotonic settlement. The package deliberately supplies no database, broker,
 filesystem, clock, chain reader, or consumer integration; adapters must provide
 atomic durable create/append and reread behavior around this contract.
 
+## Creation admission and containment budget
+
+`reserve_capacity` is the pure admission boundary used before any create side
+effect. Every operation must pass both a `(chain ID, signer owner)` aggregate
+budget and its exact `(chain ID, owner, authenticated producer issuer,
+immutable repository IDs, repository, workload class)` leaf budget in one
+proposal. The core derives and
+checks the leaf against the typed `PreparedCreate` plus trusted exposure
+evidence naming the target chain. This prevents the same signer address on two
+chains from sharing or colliding in one owner budget. A complete census and the
+broker's reservations are evaluated as three independent populations: active
+deployments, unresolved create outcomes, and financial exposure. A new
+reservation consumes one slot in each count population plus the uACT amount in
+typed evidence bound to the prepared operation, request digest, SDL digest,
+backend, and the budget's backend-policy revision. An unhealthy journal or
+recovery reader, incomplete chain or accounting census, expired evidence,
+stale policy, revision conflict, or any exceeded ceiling holds the create.
+
+Reservation transitions accept core lifecycle evidence rather than caller
+digests. A same-operation `CreateOutcome` proves non-commit, uncertainty, or a
+group/owner-bound deployment. An exact `ExecutionClosure` releases the active
+slot, while financial exposure remains reserved until same-subject
+`SettlementEvidence` records `SETTLED`. An unknown outcome retains all three.
+
+The state revision is a compare-and-swap token, not an in-process lock. A
+durable external broker must atomically persist the returned revision and retry
+after conflict. The supplied census counts resources outside the reservations
+in the same state. Its excluded-reservation count and canonical operation-set
+digest must match that exact scope's reservation population or admission holds;
+the binding advances atomically with each new reservation. The broker must
+reconcile exact operation identities so a materialized reservation is neither
+omitted nor counted twice. This package
+performs no reads, writes, authentication, locking, or live actions.
+`reserve_capacity` returns only a state- and revision-bound proposal. After a
+successful CAS, the broker must re-read that exact state and supply typed
+persistence confirmation carrying current authenticated-broker evidence to
+`confirm_persisted_reservation`. Its `CreatePermit` is only redeemable capacity,
+not network authority. `redeem_create_permit` proposes a second CAS that moves
+the exact operation from `RESERVED` to `SUBMITTING`; only authenticated
+confirmation of that persisted redemption produces a
+`CreateSubmissionAuthorization`. Outcomes cannot be recorded directly from
+`RESERVED`, so bypassing redemption fails. The external broker must serialize
+CAS and hand the resulting authorization to exactly one submission worker.
+The permit binds that authenticated producer subject as presenter, a fixed
+create-submission audience, the current owner and leaf admission-policy
+revisions, and the earliest expiry across broker authentication, exposure,
+policy, and census evidence. Redemption requires typed presentation evidence
+for that exact permit with an active revocation result; it rechecks presenter,
+audience, expiry, and both current policy revisions before proposing the second
+CAS. The final authorization retains those bindings for the submission
+adapter.
+Both proposal types have closed constructors, and each confirmation API
+re-derives the proposal from the supplied pre-CAS state and trusted request or
+permit before accepting the broker's receipt; a caller-built state cannot
+bypass a ceiling or manufacture `SUBMITTING` authority.
+Every existing-operation replay, including a terminal reservation, returns
+`RECONCILE` with no proposal or permit.
+
+This sans-I/O package validates the evidence bindings but cannot authenticate
+the broker receipt or presenter, read the revocation registry, obtain a current
+policy snapshot, execute either CAS, or make an in-memory authorization object
+single-use. The external broker must derive and authenticate
+`AuthenticatedBrokerEvidence` and `PermitPresentation`, atomically persist both
+state transitions, deliver each authorization once to its bound audience, and
+reconcile instead of blindly retrying a submission after an uncertain result.
+
 ## Close authorization policy
 
 `evaluate_close` is a pure decision boundary. It never closes a deployment and
