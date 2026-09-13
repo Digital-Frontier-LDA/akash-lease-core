@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import sys
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -406,7 +409,9 @@ def test_different_groups_may_carry_different_profiles() -> None:
     assert len(auction.snapshot()["bids"]) == 2
 
 
-def test_call_site_profile_propagation_effect_mutation_changes_the_verdict() -> None:
+def test_call_site_profile_propagation_effect_mutation_changes_the_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Deleting the adapter's profile wiring must break the end-to-end property."""
     source = inspect.getsource(_adapter_observation)
     target = "        resource_profile=profile,\n"
@@ -415,14 +420,16 @@ def test_call_site_profile_propagation_effect_mutation_changes_the_verdict() -> 
     mutated_source = source.replace(target, replacement)
     assert mutated_source.count(replacement) == 1
 
-    namespace = {
-        "BidObservation": BidObservation,
-        "Decimal": Decimal,
-        "ProviderCapacity": ProviderCapacity,
-        "ResourceProfile": ResourceProfile,
-    }
-    exec(mutated_source, namespace)
-    mutated_adapter = namespace["_adapter_observation"]
+    module_name = "mutated_profile_adapter"
+    module_path = tmp_path / f"{module_name}.py"
+    module_path.write_text(
+        "from decimal import Decimal\n"
+        "from akash_lease_core import BidObservation, ProviderCapacity, ResourceProfile\n\n"
+        + mutated_source
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    mutated_adapter = importlib.import_module(module_name)._adapter_observation
     rows = [
         ("lisbon", "9", _capacity(cpu=(900, 1000))),
         ("sofia", "1", _capacity(cpu=(100, 1000))),

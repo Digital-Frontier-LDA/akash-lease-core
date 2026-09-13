@@ -150,9 +150,10 @@ assert decision.selected.provider == "akash1lisbon"
 ```
 
 The invariant is: collect for the complete configured window (0–60 seconds),
-then choose the cheapest open preferred bid. If none exists, enter a bounded
-fallback phase and select the first observed open eligible bid; a fallback that
-already bid can be selected immediately at the phase transition. Provider
+then choose an open preferred bid under the configured selection policy. If none
+exists, enter a bounded fallback phase and select the first observed open
+eligible bid; a fallback that already bid can be selected immediately at the
+phase transition. Provider
 eligibility is policy input—not hard-coded in this package. Mixed denominations
 fail closed because unlike currencies cannot be compared safely.
 

@@ -120,14 +120,8 @@ def test_KNOWN_NEGATIVE_cheapest_picks_helsinki_from_the_same_payloads() -> None
     assert result.selection_reason == "cheapest_preferred"
 
 
-def test_an_unreadable_payload_degrades_to_cheapest_and_SAYS_SO() -> None:
-    """⛔ A provider whose /status cannot be read must not be ranked as full.
-
-    The capacity is None, so emptiest has nothing to rank on and falls back --
-    and the reason string must report the fallback rather than claiming the mode
-    it was asked for. An UNMEASURABLE fleet reporting 'emptiest_preferred' would
-    be indistinguishable from a working one.
-    """
+def test_an_unreadable_required_dimension_is_typed_rejected() -> None:
+    """⛔ A provider whose required capacity cannot be read cannot prove fit."""
     policy = AuctionPolicy(
         collection_window_seconds=10,
         preferred_providers=PREFERRED,
