@@ -403,6 +403,16 @@ class ProviderCapacity:
                 aggregate_fits = False
 
         if self.node_capacities is None:
+            # ⭐ The aggregate is the whole provider's free total here, so a request
+            # above it cannot be placed by ANY distribution: that is proven, not
+            # unreadable (#50 L4). A sufficient aggregate still proves nothing about
+            # same-node fit, so that half stays unreadable.
+            if not aggregate_fits:
+                return CapacityFit.INSUFFICIENT_CAPACITY
+            return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+        if self._contradicts_nodes(profile):
+            # ⛔ Evidence that disagrees with itself proves neither FIT nor
+            # INSUFFICIENT_CAPACITY, in either direction (#50 L3).
             return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
         readable_nodes = tuple(
             node
@@ -420,6 +430,31 @@ class ProviderCapacity:
         if placement_fit is CapacityFit.PLACEMENT_SEARCH_UNSUPPORTED:
             return placement_fit
         return CapacityFit.INSUFFICIENT_CAPACITY
+
+    def _contradicts_nodes(self, profile: ResourceProfile) -> bool:
+        """Whether the aggregate and the node list cannot both be true.
+
+        Nodes that report a dimension can only add up to AT MOST the aggregate:
+        an aggregate may omit a node that cannot be read (the provider-status
+        adapter sums only readable nodes), but never contain less than the nodes
+        it summarises. When every node reports the dimension, the two must be
+        equal. Anything else is a snapshot that disagrees with itself.
+        """
+
+        nodes = self.node_capacities or ()
+        for dimension in profile.requested_dimensions:
+            aggregate = getattr(self, _AVAILABLE_FIELDS[dimension])
+            exact_aggregate = None if aggregate is None else _exact_quantity(aggregate)
+            values = [getattr(node, _AVAILABLE_FIELDS[dimension]) for node in nodes]
+            readable = [_exact_quantity(value) for value in values if value is not None]
+            if exact_aggregate is None or any(value is None for value in readable):
+                continue  # unsupported arithmetic is typed by the placement search
+            node_sum = sum(value for value in readable if value is not None)
+            if node_sum > exact_aggregate:
+                return True
+            if len(readable) == len(values) and node_sum != exact_aggregate:
+                return True
+        return False
 
     def available_fraction_for(self, profile: ResourceProfile) -> float | None:
         """Binding fraction only when fit and the ranking population are both proven."""

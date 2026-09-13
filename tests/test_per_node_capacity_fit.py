@@ -452,17 +452,27 @@ def test_integer_to_float_effect_mutation_recreates_false_fit(
         source.replace(target, replacement), "mutated_float_quantity", tmp_path, monkeypatch
     )
     request = 2**53 + 1
-    replica = module.ReplicaProfile(cpu_millicores=request)
-    profile = module.ResourceProfile(cpu_millicores=2 * request, replicas=(replica, replica))
-    capacity = module.ProviderCapacity.from_totals(
-        cpu=(2 * request + 2, 2 * request + 2),
-        node_capacities=(
-            module.NodeCapacity(cpu_millicores_available=2 * request - 1),
-            module.NodeCapacity(cpu_millicores_available=3),
-        ),
-    )
 
-    assert capacity.fit(profile) is module.CapacityFit.FIT
+    def build(namespace):
+        replica = namespace.ReplicaProfile(cpu_millicores=request)
+        profile = namespace.ResourceProfile(
+            cpu_millicores=2 * request, replicas=(replica, replica)
+        )
+        capacity = namespace.ProviderCapacity.from_totals(
+            cpu=(2 * request + 2, 2 * request + 2),
+            node_capacities=(
+                namespace.NodeCapacity(cpu_millicores_available=2 * request - 1),
+                namespace.NodeCapacity(cpu_millicores_available=3),
+                # One node without cpu keeps the aggregate a lower bound, so the #50
+                # aggregate/node contradiction guard cannot absorb the float rounding
+                # and the placement search is what decides.
+                namespace.NodeCapacity(),
+            ),
+        )
+        return capacity.fit(profile)
+
+    assert build(capacity_module) is capacity_module.CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+    assert build(module) is module.CapacityFit.FIT
 
 
 def test_budget_result_effect_mutation_can_turn_exhaustion_into_insufficient(
