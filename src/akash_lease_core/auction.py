@@ -74,6 +74,7 @@ class BidRejectionReason(str, Enum):
     BID_OBSERVED_AFTER_FALLBACK_DEADLINE = "bid_observed_after_fallback_deadline"
     REQUIRED_CAPACITY_UNREADABLE = CapacityFit.REQUIRED_DIMENSION_UNREADABLE.value
     INSUFFICIENT_CAPACITY = CapacityFit.INSUFFICIENT_CAPACITY.value
+    PLACEMENT_SEARCH_UNSUPPORTED = CapacityFit.PLACEMENT_SEARCH_UNSUPPORTED.value
     RESOURCE_PROFILE_GROUP_UNBOUND = "resource_profile_group_unbound"
 
 
@@ -250,6 +251,10 @@ def _encode_decimal(value: Decimal) -> str:
     return str(value)
 
 
+def _encode_quantity_or_none(value: int | float | Decimal | None) -> object:
+    return str(value) if isinstance(value, Decimal) else value
+
+
 def _encode_list(value: tuple[str, ...]) -> list[str]:
     return list(value)
 
@@ -326,6 +331,21 @@ def _decode_decimal(value: object, where: str) -> Decimal:
         return Decimal(value)
     except InvalidOperation as exc:
         raise ValueError(f"{where}: {value!r} is not a decimal number") from exc
+
+
+def _decode_quantity_or_none(value: object, where: str) -> int | float | Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"{where}: expected a finite number, decimal string, or null")
+    if isinstance(value, str):
+        try:
+            value = Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError(f"{where}: {value!r} is not a decimal number") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{where}: expected a finite number, got {value!r}")
+    return value
 
 
 def _decode_str_list(value: object, where: str) -> list[str]:
@@ -418,6 +438,7 @@ _CODECS: dict[str, tuple[_Encode, _Decode]] = {
     "str": (_encode_identity, _decode_str),
     "float": (_encode_float, _decode_float),
     "float | None": (_encode_float_or_none, _decode_float_or_none),
+    "_Quantity | None": (_encode_quantity_or_none, _decode_quantity_or_none),
     "int": (_encode_identity, _decode_int),
     "int | None": (_encode_identity, _decode_int_or_none),
     "Decimal": (_encode_decimal, _decode_decimal),
@@ -833,6 +854,10 @@ class Auction:
                 elif fit is CapacityFit.INSUFFICIENT_CAPACITY:
                     rejected.append(
                         self._reject(observation, BidRejectionReason.INSUFFICIENT_CAPACITY)
+                    )
+                elif fit is CapacityFit.PLACEMENT_SEARCH_UNSUPPORTED:
+                    rejected.append(
+                        self._reject(observation, BidRejectionReason.PLACEMENT_SEARCH_UNSUPPORTED)
                     )
                 else:
                     candidates.append(observation)

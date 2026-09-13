@@ -181,6 +181,19 @@ therefore cannot make a CPU-only workload follow GPU pressure. Missing aggregate
 or possibly-relevant per-node capacity for a requested dimension remains
 unreadable unless the readable nodes already prove the full placement; measured
 but insufficient capacity is a distinct `BidRejectionReason` value.
+The placement proof is exact but NP-complete in the general case. It explores at
+most `PLACEMENT_SEARCH_STATE_LIMIT` canonical states (currently 100,000) during
+one synchronous `Auction.evaluate()` call. Reaching that bound returns the typed
+`placement_search_unsupported` rejection; it never guesses `fit` or
+`insufficient_capacity`. The iterative solver has no replica-count recursion
+limit, so low-branching groups with thousands of replicas remain supported.
+
+Akash CPU, memory, storage, and GPU units supplied as integers retain arbitrary
+precision through aggregate and per-node fit. `Decimal` values are also exact.
+Finite floats below `2**53` are compared as their exact binary values; larger
+floats cannot distinguish adjacent integral units and therefore return
+`placement_search_unsupported`. Available fractions remain floating-point ranking
+scores and do not participate in either fit proof.
 Missing `resource_profile` never invokes the old all-dimension score: it falls
 back to cheapest with the explicit
 `emptiest_request_profile_unavailable_fell_back_to_cheapest` reason.

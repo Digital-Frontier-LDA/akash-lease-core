@@ -101,6 +101,7 @@ from .auction import (
     UnsupportedSnapshotVersion,
 )
 from .capacity import (
+    PLACEMENT_SEARCH_STATE_LIMIT,
     CapacityFit,
     NodeCapacity,
     ProviderCapacity,
@@ -388,6 +389,7 @@ __all__ = [
     "evaluate_provider",
     "qualified_set",
     "PreferredSelection",
+    "PLACEMENT_SEARCH_STATE_LIMIT",
     "CapacityFit",
     "NodeCapacity",
     "ProviderCapacity",
