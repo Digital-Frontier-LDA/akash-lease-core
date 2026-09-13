@@ -519,7 +519,7 @@ class Auction:
         degenerates into a tie-break on (provider, bid_key) and the fallback
         selection chooses by last index, not by arrival.
 
-        ⇒ Mutable fields (price, state) ARE refreshed on later observations,
+        ⇒ Mutable fields (price, state, proofs, capacity) ARE refreshed on later observations,
         because a bid can legitimately change (open → closed) while arrival
         cannot. BidObservation is frozen, so refreshing mutable fields means
         rebuilding the instance with the FIRST `observed_at` preserved.
@@ -536,6 +536,14 @@ class Auction:
                 f"bid_key {observation.bid_key!r} changed provider "
                 f"from {current.provider!r} to {observation.provider!r}"
             )
+        if current is not None and current.gseq is not None:
+            if observation.gseq is None:
+                observation = replace(observation, gseq=current.gseq)
+            elif observation.gseq != current.gseq:
+                raise ValueError(
+                    f"bid_key {observation.bid_key!r} changed gseq "
+                    f"from {current.gseq} to {observation.gseq}"
+                )
         if (
             current is not None
             and current.resource_profile is not None
@@ -553,9 +561,10 @@ class Auction:
         # lost `proofs` to its default of () on every re-observation — the same defect
         # class as the one this method exists to fix, one field over.
         #
-        # observed_at is the ONLY field taken from the stored copy: it is the bid's
-        # arrival, not its latest sighting. Everything else (price, state, proofs) is
-        # mutable and the newest observation is authoritative.
+        # observed_at always comes from the stored copy: it is the bid's arrival,
+        # not its latest sighting. An established gseq and known resource profile
+        # also survive later omissions; unlike price/state, they bind identity and
+        # exact demand rather than reporting mutable transport state.
         self._latest_by_key[observation.bid_key] = replace(
             observation, observed_at=current.observed_at
         )

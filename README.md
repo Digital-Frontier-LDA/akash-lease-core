@@ -173,8 +173,9 @@ profile. Capacity snapshots retain both free fractions and absolute free units.
 A non-empty profile without a readable `gseq` is rejected because the core
 cannot prove which group it describes. Once observed, a group's profile is
 immutable; later missing observations inherit it and a conflicting non-empty
-profile is refused. Auction snapshots carry the exact profile and absolute
-capacity through crash resume.
+profile is refused. Once a bid key has a readable `gseq`, later omission keeps
+that group and an explicit group change is refused. Auction snapshots carry the
+exact profile and absolute capacity through crash resume.
 
 `already_selected` provides anti-affinity among placements evaluated against one
 auction snapshot. It does not provide balancing across separate runs.

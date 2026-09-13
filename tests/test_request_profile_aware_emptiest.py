@@ -204,7 +204,7 @@ def test_missing_profile_is_an_explicit_degraded_decision() -> None:
 def test_profile_without_a_group_cannot_authorize_fit_or_ranking() -> None:
     auction = Auction(
         AuctionPolicy(
-            collection_window_seconds=0,
+            collection_window_seconds=10,
             fallback_window_seconds=0,
             preferred_providers=PREFERRED,
             preferred_selection=PreferredSelection.EMPTIEST,
@@ -224,7 +224,9 @@ def test_profile_without_a_group_cannot_authorize_fit_or_ranking() -> None:
         )
     )
 
-    result = auction.evaluate(now=0)
+    stored = auction.snapshot()["bids"][0]
+    assert stored["gseq"] is None
+    result = auction.evaluate(now=10)
 
     assert result.status is AuctionStatus.EXPIRED
     assert result.selected is None
@@ -251,7 +253,15 @@ def test_same_group_conflicting_profiles_are_rejected() -> None:
 
 
 def test_later_missing_profile_cannot_clear_known_group_profile() -> None:
-    auction = Auction(AuctionPolicy(), started_at=0)
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=10,
+            fallback_window_seconds=0,
+            preferred_providers=frozenset({"lisbon"}),
+            preferred_selection=PreferredSelection.EMPTIEST,
+        ),
+        started_at=0,
+    )
     profile = ResourceProfile(cpu_millicores=100)
     capacity = _capacity(cpu=(900, 1000))
     first = _adapter_observation("lisbon", "1", capacity, profile, 1)
@@ -271,6 +281,36 @@ def test_later_missing_profile_cannot_clear_known_group_profile() -> None:
 
     stored = auction.snapshot()["bids"][0]
     assert stored["resource_profile"]["cpu_millicores"] == 100
+    assert stored["gseq"] == 1
+    result = auction.evaluate(now=10)
+    assert result.status is AuctionStatus.DECIDED
+    assert result.selected is not None
+    assert result.selected.gseq == 1
+    assert result.selection_reason is SelectionReason.EMPTIEST_PREFERRED
+
+
+def test_same_bid_key_cannot_change_its_established_group() -> None:
+    auction = Auction(AuctionPolicy(), started_at=0)
+    capacity = _capacity(cpu=(900, 1000))
+    first = _adapter_observation("lisbon", "1", capacity, ResourceProfile(cpu_millicores=100), 1)
+    auction.observe(first)
+
+    with pytest.raises(ValueError, match="changed gseq from 1 to 2"):
+        auction.observe(
+            BidObservation(
+                bid_key=first.bid_key,
+                provider=first.provider,
+                price=first.price,
+                denom=first.denom,
+                observed_at=2,
+                capacity=capacity,
+                resource_profile=first.resource_profile,
+                gseq=2,
+            )
+        )
+
+    stored = auction.snapshot()["bids"][0]
+    assert stored["gseq"] == 1
 
 
 def test_late_profile_backfills_earlier_bid_for_same_group_order_independently() -> None:
