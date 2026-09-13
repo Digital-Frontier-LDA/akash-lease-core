@@ -15,6 +15,7 @@ Measured on v0.15.0 by DEV1-blazing's post-merge review:
 from __future__ import annotations
 
 from decimal import Decimal
+from fractions import Fraction
 
 import pytest
 
@@ -30,6 +31,7 @@ from akash_lease_core import (
     ResourceProfile,
     SelectionReason,
 )
+from akash_lease_core.capacity import from_provider_status
 
 PROFILE = ResourceProfile(cpu_millicores=100)
 
@@ -152,6 +154,7 @@ def test_profile_unavailable_fallback_honours_already_selected() -> None:
         result.selection_reason
         is SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
     )
+    assert [item.provider for item in result.considered] == ["r", "q"]
 
 
 @pytest.mark.parametrize("profile", [PROFILE, None])
@@ -226,6 +229,90 @@ def test_consistent_insufficiency_is_still_proven() -> None:
     )
 
     assert capacity.fit(ResourceProfile(cpu_millicores=8_000)) is CapacityFit.INSUFFICIENT_CAPACITY
+
+
+GI = 2**30
+
+
+@pytest.mark.parametrize(
+    "nodes",
+    [
+        pytest.param(
+            (
+                NodeCapacity(cpu_millicores_available=2_000, memory_bytes_available=16 * GI),
+                NodeCapacity(cpu_millicores_available=2_000),
+            ),
+            id="readable-memory-node-above-its-aggregate",
+        ),
+        pytest.param(
+            (
+                NodeCapacity(cpu_millicores_available=2_000, memory_bytes_available=1 * GI),
+                NodeCapacity(cpu_millicores_available=2_000, memory_bytes_available=1 * GI),
+            ),
+            id="complete-memory-list-below-its-aggregate",
+        ),
+    ],
+)
+def test_a_contradiction_on_a_later_dimension_is_unreadable(nodes) -> None:
+    """CPU agrees exactly; only memory contradicts. Every dimension is checked, not the first."""
+    capacity = ProviderCapacity.from_totals(
+        cpu=(4_000, 8_000), memory=(5 * GI, 32 * GI), node_capacities=nodes
+    )
+    profile = ResourceProfile(cpu_millicores=1_000, memory_bytes=1 * GI)
+
+    assert capacity.fit(profile) is CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+
+
+@pytest.mark.parametrize(
+    ("nodes", "expected"),
+    [
+        pytest.param(
+            (8_001, None), CapacityFit.REQUIRED_DIMENSION_UNREADABLE, id="partial-one-over"
+        ),
+        pytest.param((8_000, None), CapacityFit.FIT, id="partial-exactly-equal"),
+        pytest.param((7_999,), CapacityFit.REQUIRED_DIMENSION_UNREADABLE, id="complete-one-under"),
+        pytest.param((8_001,), CapacityFit.REQUIRED_DIMENSION_UNREADABLE, id="complete-one-over"),
+        pytest.param((8_000,), CapacityFit.FIT, id="complete-exactly-equal"),
+    ],
+)
+def test_the_contradiction_boundary_is_exact(nodes, expected) -> None:
+    capacity = ProviderCapacity.from_totals(
+        cpu=(8_000, 16_000),
+        node_capacities=tuple(NodeCapacity(cpu_millicores_available=n) for n in nodes),
+    )
+
+    assert capacity.fit(ResourceProfile(cpu_millicores=1_000)) is expected
+
+
+def _status(values):
+    return {
+        "cluster": {
+            "inventory": {
+                "available": {
+                    "nodes": [{"allocatable": {"cpu": v}, "available": {"cpu": v}} for v in values]
+                }
+            }
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        pytest.param([10**28, 1], id="integers-past-28-digits"),
+        pytest.param([17179869184.123457, 1.2345678901234568e-05], id="floats-past-28-digits"),
+    ],
+)
+def test_the_adapter_aggregate_never_contradicts_its_own_nodes(values) -> None:
+    """The provider-status adapter must sum exactly, or its own snapshot reads contradictory."""
+    capacity = from_provider_status(_status(values))
+
+    assert capacity.fit(ResourceProfile(cpu_millicores=1)) is CapacityFit.FIT
+    nodes = capacity.node_capacities or ()
+    # Fractions, not Decimals: a default-context Decimal sum is the very rounding under test.
+    assert sum(Fraction(node.cpu_millicores_available) for node in nodes) == Fraction(
+        capacity.cpu_millicores_available
+    )
 
 
 # ── L4 ──────────────────────────────────────────────────────────────────────

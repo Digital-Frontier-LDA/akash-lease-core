@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, Inexact, Rounded, localcontext
 from enum import Enum
 from fractions import Fraction
 from typing import TypeAlias
@@ -338,6 +338,10 @@ class ProviderCapacity:
         GPUs at all is *not applicable* on that dimension; scoring it as 0% free
         would rank every CPU-only provider as completely full and hand every GPU
         provider the auction regardless of contention.
+
+        ⚠ Without ``node_capacities`` each ``available`` is taken to be the provider's
+        COMPLETE free total: :meth:`fit` reads an aggregate below the request as proven
+        ``insufficient_capacity``. Pass a node list when the aggregate may omit nodes.
         """
         unknown = set(dims) - set(_DIMENSIONS)
         if unknown:
@@ -512,14 +516,36 @@ def _usable(value: object) -> bool:
     return math.isfinite(value) and value >= 0
 
 
+def _exact_decimal_sum(values: list[Decimal]) -> Decimal:
+    """Sum finite decimals with no rounding, however many digits they need.
+
+    ⛔ The default context keeps 28 significant digits. Summing there rounds the
+    aggregate while each node keeps its exact value, so the snapshot would disagree
+    with itself and the aggregate/node contradiction check would read a healthy
+    provider as unreadable (10**28 + 1 does it with integers). Precision grows until
+    the sum is exact instead.
+    """
+
+    precision = 28
+    while True:
+        with localcontext() as context:
+            context.prec = precision
+            context.traps[Inexact] = True
+            context.traps[Rounded] = True
+            try:
+                return sum(values, Decimal(0))
+            except (Inexact, Rounded):
+                precision *= 2
+
+
 def _summarize_nodes(
     nodes: object,
 ) -> tuple[dict[str, tuple[float, float] | None], tuple[NodeCapacity, ...]] | None:
     """Retain each node's free units while summing provider-wide totals."""
     if not isinstance(nodes, (list, tuple)) or not nodes:
         return None
-    totals: dict[str, Decimal] = {ours: Decimal(0) for ours, _ in _STATUS_DIMENSIONS}
-    frees: dict[str, Decimal] = {ours: Decimal(0) for ours, _ in _STATUS_DIMENSIONS}
+    total_parts: dict[str, list[Decimal]] = {ours: [] for ours, _ in _STATUS_DIMENSIONS}
+    free_parts: dict[str, list[Decimal]] = {ours: [] for ours, _ in _STATUS_DIMENSIONS}
     overreported: set[str] = set()
     node_capacities: list[NodeCapacity] = []
     seen = False
@@ -560,8 +586,8 @@ def _summarize_nodes(
                 continue
             exact_total = Decimal(total) if isinstance(total, int) else Decimal(str(total))
             exact_free = Decimal(free) if isinstance(free, int) else Decimal(str(free))
-            totals[ours] += exact_total
-            frees[ours] += exact_free
+            total_parts[ours].append(exact_total)
+            free_parts[ours].append(exact_free)
             node_free[_AVAILABLE_FIELDS[ours]] = (
                 int(exact_free) if exact_free == exact_free.to_integral_value() else exact_free
             )
@@ -573,6 +599,8 @@ def _summarize_nodes(
     #    raise ValueError, breaking this module's documented promise that a
     #    malformed payload yields an unreadable capacity rather than an exception.
     #    Found by CodeRabbit on #26.
+    totals = {ours: _exact_decimal_sum(parts) for ours, parts in total_parts.items()}
+    frees = {ours: _exact_decimal_sum(parts) for ours, parts in free_parts.items()}
     for ours, _ in _STATUS_DIMENSIONS:
         if not math.isfinite(totals[ours]) or not math.isfinite(frees[ours]):
             return None
