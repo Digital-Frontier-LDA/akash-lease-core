@@ -174,11 +174,13 @@ eligibility is policy input—not hard-coded in this package. Mixed denomination
 fail closed because unlike currencies cannot be compared safely.
 
 `EMPTIEST` first proves that the provider's aggregate free units can fit the
-whole group and that one node can fit every individual replica, then ranks by
-the binding free fraction across only the dimensions the group requests. A zero
-GPU request therefore cannot make a CPU-only workload follow GPU pressure.
-Missing aggregate or per-node capacity for a requested dimension and
-measured-but-insufficient capacity are distinct `BidRejectionReason` values.
+whole group and that every replica can be assigned to a node while consuming
+that node's CPU, memory, storage, and GPU headroom. It then ranks by the binding
+free fraction across only the dimensions the group requests. A zero GPU request
+therefore cannot make a CPU-only workload follow GPU pressure. Missing aggregate
+or possibly-relevant per-node capacity for a requested dimension remains
+unreadable unless the readable nodes already prove the full placement; measured
+but insufficient capacity is a distinct `BidRejectionReason` value.
 Missing `resource_profile` never invokes the old all-dimension score: it falls
 back to cheapest with the explicit
 `emptiest_request_profile_unavailable_fell_back_to_cheapest` reason.

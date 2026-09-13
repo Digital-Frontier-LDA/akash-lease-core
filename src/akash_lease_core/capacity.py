@@ -7,8 +7,10 @@ deployment can pile onto providers that have no room while a mostly-empty one
 sits idle. Emptiest-first raises the odds that all three regions place at once.
 
 Fractions rank providers of different sizes. Absolute free units prove that the
-exact group fits before a fraction is allowed to rank it. Neither substitutes
-for the other, so provider snapshots retain both.
+exact group fits before a fraction is allowed to rank it: the aggregate must fit
+and all replicas must pack onto nodes while consuming their multidimensional
+headroom. Neither proof substitutes for the other, so provider snapshots retain
+both.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
+from functools import cache
 
 __all__ = ["CapacityFit", "NodeCapacity", "ProviderCapacity", "ReplicaProfile", "ResourceProfile"]
 
@@ -154,6 +157,76 @@ class NodeCapacity:
         return CapacityFit.FIT
 
 
+def _replicas_fit_nodes(
+    replicas: tuple[ReplicaProfile, ...], nodes: tuple[NodeCapacity, ...]
+) -> bool:
+    """Return whether every replica can be placed while consuming node capacity.
+
+    This is an exact, deterministic multidimensional bin-packing search. Replica
+    order is only a search heuristic; memoization and canonical node states mean
+    the verdict does not depend on provider node order or SDL service order.
+    """
+
+    if not nodes:
+        return False
+
+    dimensions = tuple(_AVAILABLE_FIELDS)
+    maximum = {
+        dimension: max(getattr(node, _AVAILABLE_FIELDS[dimension]) or 0.0 for node in nodes)
+        for dimension in dimensions
+    }
+
+    def difficulty(replica: ReplicaProfile) -> tuple[float, ...]:
+        ratios = tuple(
+            getattr(replica, _REQUEST_FIELDS[dimension]) / maximum[dimension]
+            if maximum[dimension]
+            else 0.0
+            for dimension in dimensions
+        )
+        return (max(ratios), sum(ratios), *ratios)
+
+    ordered_replicas = tuple(sorted(replicas, key=difficulty, reverse=True))
+    initial_nodes = tuple(
+        sorted(
+            (
+                tuple(
+                    float(getattr(node, _AVAILABLE_FIELDS[dimension]) or 0.0)
+                    for dimension in dimensions
+                )
+                for node in nodes
+            ),
+            reverse=True,
+        )
+    )
+
+    @cache
+    def place(index: int, remaining: tuple[tuple[float, ...], ...]) -> bool:
+        if index == len(ordered_replicas):
+            return True
+        replica = ordered_replicas[index]
+        request = tuple(
+            float(getattr(replica, _REQUEST_FIELDS[dimension])) for dimension in dimensions
+        )
+        tried: set[tuple[float, ...]] = set()
+        for node_index, available in enumerate(remaining):
+            if available in tried or any(
+                have < need for have, need in zip(available, request, strict=True)
+            ):
+                continue
+            tried.add(available)
+            after = tuple(have - need for have, need in zip(available, request, strict=True))
+            next_remaining = tuple(
+                sorted(
+                    (*remaining[:node_index], after, *remaining[node_index + 1 :]), reverse=True
+                )
+            )
+            if place(index + 1, next_remaining):
+                return True
+        return False
+
+    return place(0, initial_nodes)
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderCapacity:
     """Available fraction per dimension, in ``[0.0, 1.0]``. ``None`` = UNREADABLE.
@@ -267,24 +340,31 @@ class ProviderCapacity:
     def fit(self, profile: ResourceProfile) -> CapacityFit:
         """Prove both full-group aggregate fit and same-node replica fit."""
 
+        aggregate_fits = True
         for dimension in profile.requested_dimensions:
             fraction = getattr(self, dimension)
             available = getattr(self, _AVAILABLE_FIELDS[dimension])
             if fraction is None or available is None:
                 return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
             if available < getattr(profile, _REQUEST_FIELDS[dimension]):
-                return CapacityFit.INSUFFICIENT_CAPACITY
+                aggregate_fits = False
 
         if self.node_capacities is None:
             return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
-        for replica in profile.replicas:
-            node_fits = tuple(node.fit(replica) for node in self.node_capacities)
-            if CapacityFit.FIT in node_fits:
-                continue
-            if CapacityFit.REQUIRED_DIMENSION_UNREADABLE in node_fits:
-                return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
-            return CapacityFit.INSUFFICIENT_CAPACITY
-        return CapacityFit.FIT
+        readable_nodes = tuple(
+            node
+            for node in self.node_capacities
+            if all(
+                getattr(node, _AVAILABLE_FIELDS[dimension]) is not None
+                for dimension in profile.requested_dimensions
+            )
+        )
+        placement_fits = _replicas_fit_nodes(profile.replicas, readable_nodes)
+        if aggregate_fits and placement_fits:
+            return CapacityFit.FIT
+        if len(readable_nodes) != len(self.node_capacities):
+            return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+        return CapacityFit.INSUFFICIENT_CAPACITY
 
     def available_fraction_for(self, profile: ResourceProfile) -> float | None:
         """Binding fraction across requested dimensions, after a positive fit proof."""

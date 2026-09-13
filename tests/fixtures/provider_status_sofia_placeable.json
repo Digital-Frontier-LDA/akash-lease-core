@@ -4,11 +4,11 @@
       "available": {
         "nodes": [
           {"name": "node1", "allocatable": {"cpu": 72000}, "available": {"cpu": 8000}},
-          {"name": "node2", "allocatable": {"cpu": 72000}, "available": {"cpu": 5200}},
-          {"name": "node3", "allocatable": {"cpu": 72000}, "available": {"cpu": 4700}},
-          {"name": "node4", "allocatable": {"cpu": 72000}, "available": {"cpu": 4400}},
-          {"name": "node5", "allocatable": {"cpu": 72000}, "available": {"cpu": 4000}},
-          {"name": "node6", "allocatable": {"cpu": 72000}, "available": {"cpu": 3600}}
+          {"name": "node2", "allocatable": {"cpu": 72000}, "available": {"cpu": 8000}},
+          {"name": "node3", "allocatable": {"cpu": 72000}, "available": {"cpu": 4000}},
+          {"name": "node4", "allocatable": {"cpu": 72000}, "available": {"cpu": 3500}},
+          {"name": "node5", "allocatable": {"cpu": 72000}, "available": {"cpu": 3300}},
+          {"name": "node6", "allocatable": {"cpu": 72000}, "available": {"cpu": 3100}}
         ]
       }
     }
