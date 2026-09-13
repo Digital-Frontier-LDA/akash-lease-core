@@ -16,6 +16,7 @@ from akash_lease_core import (
     AuctionStatus,
     BidObservation,
     BidRejectionReason,
+    CapacityFit,
     NodeCapacity,
     PreferredSelection,
     ProviderCapacity,
@@ -23,7 +24,7 @@ from akash_lease_core import (
     SelectionReason,
 )
 
-PREFERRED = frozenset({"lisbon", "sofia", "helsinki", "small", "large"})
+PREFERRED = frozenset({"lisbon", "sofia", "helsinki", "small", "large", "partial", "complete"})
 
 
 def _adapter_observation(
@@ -178,6 +179,59 @@ def test_unreadable_required_dimension_and_insufficient_fit_are_distinct() -> No
         BidRejectionReason.REQUIRED_CAPACITY_UNREADABLE,
         BidRejectionReason.INSUFFICIENT_CAPACITY,
     }
+
+
+def test_partial_inventory_can_prove_fit_but_cannot_prove_emptiest() -> None:
+    profile = ResourceProfile(cpu_millicores=1)
+    partial = ProviderCapacity.from_totals(
+        cpu=(10, 10),
+        node_capacities=(
+            NodeCapacity(cpu_millicores_available=10),
+            NodeCapacity(),
+        ),
+    )
+    complete = ProviderCapacity.from_totals(
+        cpu=(90, 100),
+        node_capacities=(NodeCapacity(cpu_millicores_available=90),),
+    )
+
+    assert partial.fit(profile) is CapacityFit.FIT
+    assert partial.available_fraction_for(profile) is None
+    result = _evaluate([("partial", "9", partial), ("complete", "1", complete)], profile)
+
+    assert result.selected.provider == "complete"
+    assert (
+        result.selection_reason
+        is SelectionReason.EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST
+    )
+    assert [item.provider for item in result.considered] == ["complete", "partial"]
+
+
+def test_ranking_completeness_call_site_changes_the_auction_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = ResourceProfile(cpu_millicores=1)
+    partial = ProviderCapacity.from_totals(
+        cpu=(10, 10),
+        node_capacities=(
+            NodeCapacity(cpu_millicores_available=10),
+            NodeCapacity(),
+        ),
+    )
+    complete = ProviderCapacity.from_totals(
+        cpu=(90, 100),
+        node_capacities=(NodeCapacity(cpu_millicores_available=90),),
+    )
+    rows = [("partial", "9", partial), ("complete", "1", complete)]
+    normal = _evaluate(rows, profile)
+
+    monkeypatch.setattr(ProviderCapacity, "ranking_complete_for", lambda self, request: True)
+    mutated = _evaluate(rows, profile)
+
+    assert normal.selected.provider == "complete"
+    assert mutated.selected.provider == "partial"
+    assert normal.selection_reason is not mutated.selection_reason
+    assert mutated.selection_reason is SelectionReason.EMPTIEST_PREFERRED
 
 
 def test_missing_profile_is_an_explicit_degraded_decision() -> None:

@@ -88,6 +88,9 @@ class SelectionReason(str, Enum):
     EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST = (
         "emptiest_request_profile_unavailable_fell_back_to_cheapest"
     )
+    EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST = (
+        "emptiest_capacity_incomplete_fell_back_to_cheapest"
+    )
     CHEAPEST_PREFERRED = "cheapest_preferred"
     FIRST_ELIGIBLE_FALLBACK = "first_eligible_fallback"
 
@@ -899,7 +902,13 @@ class Auction:
         if preferred:
             emptiest = self.policy.preferred_selection is PreferredSelection.EMPTIEST
             profiles_complete = all(item.resource_profile is not None for item in pool)
-            if emptiest and profiles_complete:
+            ranking_complete = profiles_complete and all(
+                item.capacity is not None
+                and item.resource_profile is not None
+                and item.capacity.ranking_complete_for(item.resource_profile)
+                for item in pool
+            )
+            if emptiest and ranking_complete:
                 # ⭐ ANTI-AFFINITY FIRST, headroom second.
                 #
                 # A multi-region deployment evaluates several auctions against ONE
@@ -932,7 +941,11 @@ class Auction:
                 # make an unmeasurable fleet indistinguishable from a fleet that
                 # was measured and happened to agree.
                 reason = (
-                    SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
+                    (
+                        SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
+                        if not profiles_complete
+                        else SelectionReason.EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST
+                    )
                     if emptiest
                     else SelectionReason.CHEAPEST_PREFERRED
                 )

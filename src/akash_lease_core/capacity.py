@@ -422,11 +422,28 @@ class ProviderCapacity:
         return CapacityFit.INSUFFICIENT_CAPACITY
 
     def available_fraction_for(self, profile: ResourceProfile) -> float | None:
-        """Binding fraction across requested dimensions, after a positive fit proof."""
+        """Binding fraction only when fit and the ranking population are both proven."""
 
-        if self.fit(profile) is not CapacityFit.FIT:
+        if self.fit(profile) is not CapacityFit.FIT or not self.ranking_complete_for(profile):
             return None
         return min(getattr(self, dimension) for dimension in profile.requested_dimensions)
+
+    def ranking_complete_for(self, profile: ResourceProfile) -> bool:
+        """Whether every node reports every dimension used by the ranking.
+
+        Readable nodes can prove that a replica population fits even when another
+        node is unreadable. They cannot prove the provider-wide free fraction:
+        silently omitting the unreadable node changes both the numerator and the
+        denominator and can manufacture an ``emptiest`` winner.
+        """
+
+        return self.node_capacities is not None and all(
+            all(
+                getattr(node, _AVAILABLE_FIELDS[dimension]) is not None
+                for dimension in profile.requested_dimensions
+            )
+            for node in self.node_capacities
+        )
 
     @property
     def is_readable(self) -> bool:

@@ -53,7 +53,7 @@ logic.
 The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.14.0
+akash-lease-core main   0.15.0
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -65,7 +65,7 @@ docstring discussing older behaviour. #33 read those as live pins and reported a
 range inside one consumer; the resolved skew is a single version. A naive grep counts prose as
 configuration, and here it inflated the finding by two versions.
 
-⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.14.0` contains behaviour
+⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.15.0` contains behaviour
 changes that matter has not been determined. Upgrading consumers onto a version nobody has
 diffed is how a shared library becomes an incident — establish the intended pin contract
 (#32) first.
@@ -181,6 +181,12 @@ therefore cannot make a CPU-only workload follow GPU pressure. Missing aggregate
 or possibly-relevant per-node capacity for a requested dimension remains
 unreadable unless the readable nodes already prove the full placement; measured
 but insufficient capacity is a distinct `BidRejectionReason` value.
+Known nodes may therefore prove `FIT` while an unreadable sibling remains. That
+partial inventory can never prove the provider-wide free fraction used to rank
+`EMPTIEST`: the auction falls back to deterministic cheapest selection with the
+typed reason `emptiest_capacity_incomplete_fell_back_to_cheapest`. Silently
+omitting an unreadable node from the fraction could otherwise manufacture an
+emptiest winner.
 The placement proof is exact but NP-complete in the general case. It explores at
 most `PLACEMENT_SEARCH_STATE_LIMIT` canonical states (currently 100,000) during
 one synchronous `Auction.evaluate()` call. Reaching that bound returns the typed
