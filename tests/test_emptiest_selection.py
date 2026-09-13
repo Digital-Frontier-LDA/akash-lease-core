@@ -43,6 +43,7 @@ def _auction(mode: PreferredSelection, fleet, *, profile=DEFAULT_PROFILE):
                 observed_at=1.0 + index,
                 capacity=capacity,
                 resource_profile=profile,
+                gseq=1,
             )
         )
     return auction

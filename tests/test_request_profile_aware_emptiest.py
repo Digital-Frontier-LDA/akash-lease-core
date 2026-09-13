@@ -28,6 +28,8 @@ def _adapter_observation(
     capacity: ProviderCapacity,
     profile: ResourceProfile,
     index: int,
+    *,
+    gseq: int = 1,
 ) -> BidObservation:
     """The consumer boundary: the exact group profile must reach its bid."""
     return BidObservation(
@@ -38,6 +40,7 @@ def _adapter_observation(
         observed_at=float(index),
         capacity=capacity,
         resource_profile=profile,
+        gseq=gseq,
     )
 
 
@@ -185,6 +188,7 @@ def test_missing_profile_is_an_explicit_degraded_decision() -> None:
                 denom="uakt",
                 observed_at=float(index),
                 capacity=capacity,
+                gseq=1,
             )
         )
 
@@ -195,6 +199,122 @@ def test_missing_profile_is_an_explicit_degraded_decision() -> None:
         result.selection_reason
         is SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
     )
+
+
+def test_profile_without_a_group_cannot_authorize_fit_or_ranking() -> None:
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=0,
+            fallback_window_seconds=0,
+            preferred_providers=PREFERRED,
+            preferred_selection=PreferredSelection.EMPTIEST,
+        ),
+        started_at=0,
+    )
+    auction.observe(
+        BidObservation(
+            bid_key="unbound",
+            provider="lisbon",
+            price=Decimal("1"),
+            denom="uakt",
+            observed_at=0,
+            capacity=_capacity(cpu=(900, 1000)),
+            resource_profile=ResourceProfile(cpu_millicores=10),
+            gseq=None,
+        )
+    )
+
+    result = auction.evaluate(now=0)
+
+    assert result.status is AuctionStatus.EXPIRED
+    assert result.selected is None
+    assert result.rejected[0].reason is BidRejectionReason.RESOURCE_PROFILE_GROUP_UNBOUND
+
+
+def test_same_group_conflicting_profiles_are_rejected() -> None:
+    auction = Auction(AuctionPolicy(), started_at=0)
+    capacity = _capacity(cpu=(900, 1000), memory=(900, 1000))
+    auction.observe(
+        _adapter_observation("lisbon", "1", capacity, ResourceProfile(cpu_millicores=100), 1)
+    )
+
+    with pytest.raises(ValueError, match="gseq 1 changed resource profile"):
+        auction.observe(
+            _adapter_observation(
+                "sofia",
+                "2",
+                capacity,
+                ResourceProfile(cpu_millicores=100, memory_bytes=100),
+                2,
+            )
+        )
+
+
+def test_later_missing_profile_cannot_clear_known_group_profile() -> None:
+    auction = Auction(AuctionPolicy(), started_at=0)
+    profile = ResourceProfile(cpu_millicores=100)
+    capacity = _capacity(cpu=(900, 1000))
+    first = _adapter_observation("lisbon", "1", capacity, profile, 1)
+    auction.observe(first)
+    auction.observe(
+        BidObservation(
+            bid_key=first.bid_key,
+            provider=first.provider,
+            price=Decimal("2"),
+            denom=first.denom,
+            observed_at=2,
+            capacity=capacity,
+            resource_profile=None,
+            gseq=None,
+        )
+    )
+
+    stored = auction.snapshot()["bids"][0]
+    assert stored["resource_profile"]["cpu_millicores"] == 100
+
+
+def test_late_profile_backfills_earlier_bid_for_same_group_order_independently() -> None:
+    auction = Auction(AuctionPolicy(), started_at=0)
+    capacity = _capacity(cpu=(900, 1000))
+    auction.observe(
+        BidObservation(
+            bid_key="first",
+            provider="lisbon",
+            price=Decimal("1"),
+            denom="uakt",
+            observed_at=1,
+            capacity=capacity,
+            resource_profile=None,
+            gseq=1,
+        )
+    )
+    profile = ResourceProfile(cpu_millicores=100)
+    auction.observe(_adapter_observation("sofia", "2", capacity, profile, 2))
+
+    profiles = [item["resource_profile"] for item in auction.snapshot()["bids"]]
+    assert profiles == [
+        {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0},
+        {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0},
+    ]
+
+
+def test_different_groups_may_carry_different_profiles() -> None:
+    auction = Auction(AuctionPolicy(), started_at=0)
+    capacity = _capacity(cpu=(900, 1000), memory=(900, 1000))
+    auction.observe(
+        _adapter_observation("lisbon", "1", capacity, ResourceProfile(cpu_millicores=100), 1)
+    )
+    second = _adapter_observation(
+        "sofia",
+        "2",
+        capacity,
+        ResourceProfile(memory_bytes=100),
+        2,
+        gseq=2,
+    )
+    auction.observe(second)
+
+    assert len(auction.snapshot()["bids"]) == 2
 
 
 def test_call_site_profile_propagation_effect_mutation_changes_the_verdict() -> None:

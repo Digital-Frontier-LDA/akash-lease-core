@@ -74,6 +74,7 @@ class BidRejectionReason(str, Enum):
     BID_OBSERVED_AFTER_FALLBACK_DEADLINE = "bid_observed_after_fallback_deadline"
     REQUIRED_CAPACITY_UNREADABLE = CapacityFit.REQUIRED_DIMENSION_UNREADABLE.value
     INSUFFICIENT_CAPACITY = CapacityFit.INSUFFICIENT_CAPACITY.value
+    RESOURCE_PROFILE_GROUP_UNBOUND = "resource_profile_group_unbound"
 
 
 class SelectionReason(str, Enum):
@@ -481,6 +482,32 @@ class Auction:
         self.deadline = started_at + policy.collection_window_seconds
         self.fallback_deadline = self.deadline + policy.fallback_window_seconds
         self._latest_by_key: dict[str, BidObservation] = {}
+        self._resource_profile_by_gseq: dict[int, ResourceProfile] = {}
+
+    def _bind_resource_profile(self, observation: BidObservation) -> BidObservation:
+        """Bind one immutable aggregate profile to each readable group sequence."""
+
+        if observation.gseq is None:
+            return observation
+        known = self._resource_profile_by_gseq.get(observation.gseq)
+        if observation.resource_profile is None:
+            return observation if known is None else replace(observation, resource_profile=known)
+        if known is not None and observation.resource_profile != known:
+            raise ValueError(
+                f"gseq {observation.gseq} changed resource profile from {known!r} "
+                f"to {observation.resource_profile!r}"
+            )
+        if known is None:
+            self._resource_profile_by_gseq[observation.gseq] = observation.resource_profile
+            # Observation order cannot decide whether an earlier bid remains
+            # unprofiled. Once exact group evidence arrives, apply it to every
+            # already-observed bid for that group.
+            for bid_key, current in tuple(self._latest_by_key.items()):
+                if current.gseq == observation.gseq and current.resource_profile is None:
+                    self._latest_by_key[bid_key] = replace(
+                        current, resource_profile=observation.resource_profile
+                    )
+        return observation
 
     def observe(self, observation: BidObservation) -> None:
         """Record a `BidObservation`, preserving first arrival, refreshing mutable state.
@@ -504,14 +531,21 @@ class Auction:
         this version, the adapter-level guard can be dropped.
         """
         current = self._latest_by_key.get(observation.bid_key)
-        if current is None:
-            self._latest_by_key[observation.bid_key] = observation
-            return
-        if current.provider != observation.provider:
+        if current is not None and current.provider != observation.provider:
             raise ValueError(
                 f"bid_key {observation.bid_key!r} changed provider "
                 f"from {current.provider!r} to {observation.provider!r}"
             )
+        if (
+            current is not None
+            and current.resource_profile is not None
+            and observation.resource_profile is None
+        ):
+            observation = replace(observation, resource_profile=current.resource_profile)
+        observation = self._bind_resource_profile(observation)
+        if current is None:
+            self._latest_by_key[observation.bid_key] = observation
+            return
         # Re-observation: KEEP first arrival, REFRESH mutable state.
         # `replace` rather than a field-by-field rebuild: this is FIELD-COMPLETE by
         # construction, so a field added to BidObservation later cannot be silently
@@ -693,7 +727,8 @@ class Auction:
             observations[observation.bid_key] = observation
 
         auction = cls(policy, started_at=new_started_at)
-        auction._latest_by_key = observations
+        for observation in observations.values():
+            auction.observe(observation)
         return auction
 
     def evaluate(
@@ -736,6 +771,14 @@ class Auction:
                         observation,
                         BidRejectionReason.BID_OBSERVED_AFTER_FALLBACK_DEADLINE,
                     )
+                )
+            elif (
+                self.policy.preferred_selection is PreferredSelection.EMPTIEST
+                and observation.resource_profile is not None
+                and observation.gseq is None
+            ):
+                rejected.append(
+                    self._reject(observation, BidRejectionReason.RESOURCE_PROFILE_GROUP_UNBOUND)
                 )
             elif (
                 self.policy.preferred_selection is PreferredSelection.EMPTIEST

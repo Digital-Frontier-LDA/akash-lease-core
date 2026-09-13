@@ -72,6 +72,7 @@ def _auction(mode: PreferredSelection, fleet):
                 observed_at=1.0 + index,
                 capacity=_capacity(provider),
                 resource_profile=ResourceProfile(cpu_millicores=100),
+                gseq=1,
             )
         )
     return auction
@@ -143,6 +144,7 @@ def test_an_unreadable_payload_degrades_to_cheapest_and_SAYS_SO() -> None:
                 observed_at=1.0 + index,
                 capacity=from_provider_status({}),  # unreadable, NOT full
                 resource_profile=ResourceProfile(cpu_millicores=100),
+                gseq=1,
             )
         )
     result = auction.evaluate(now=71.0)

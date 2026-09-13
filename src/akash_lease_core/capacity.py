@@ -141,6 +141,10 @@ class ProviderCapacity:
                 raise ValueError(f"{name}: available and total must be finite")
             if total < 0 or available < 0:
                 raise ValueError(f"{name}: available and total must be non-negative")
+            if available > total:
+                raise ValueError(
+                    f"{name}: available must not exceed total ({available} > {total})"
+                )
             if total == 0:
                 out[name] = None
                 out[_AVAILABLE_FIELDS[name]] = None
@@ -213,12 +217,13 @@ def _usable(value: object) -> bool:
     return math.isfinite(value) and value >= 0
 
 
-def _sum_nodes(nodes: object) -> dict[str, tuple[float, float]] | None:
+def _sum_nodes(nodes: object) -> dict[str, tuple[float, float] | None] | None:
     """Sum (available, total) per dimension across a provider's nodes."""
     if not isinstance(nodes, (list, tuple)) or not nodes:
         return None
     totals: dict[str, float] = {ours: 0.0 for ours, _ in _STATUS_DIMENSIONS}
     frees: dict[str, float] = {ours: 0.0 for ours, _ in _STATUS_DIMENSIONS}
+    overreported: set[str] = set()
     seen = False
     for node in nodes:
         if not isinstance(node, Mapping):
@@ -246,6 +251,12 @@ def _sum_nodes(nodes: object) -> dict[str, tuple[float, float]] | None:
             #   by isinstance(x, (int, float)) -- True would count as 1 unit.
             if not _usable(total) or not _usable(free):
                 continue
+            # Available > allocatable is not "extra headroom". Clamping its
+            # fraction to 1 while retaining the oversized absolute value would
+            # let corrupt evidence prove a workload fits.
+            if free > total:
+                overreported.add(ours)
+                continue
             totals[ours] += float(total)
             frees[ours] += float(free)
     if not seen:
@@ -258,7 +269,10 @@ def _sum_nodes(nodes: object) -> dict[str, tuple[float, float]] | None:
     for ours, _ in _STATUS_DIMENSIONS:
         if not math.isfinite(totals[ours]) or not math.isfinite(frees[ours]):
             return None
-    return {ours: (frees[ours], totals[ours]) for ours, _ in _STATUS_DIMENSIONS}
+    return {
+        ours: None if ours in overreported else (frees[ours], totals[ours])
+        for ours, _ in _STATUS_DIMENSIONS
+    }
 
 
 def from_provider_status(status: object) -> ProviderCapacity:

@@ -497,6 +497,17 @@ class TestRefusals:
         with pytest.raises(ValueError, match="duplicate bid_key"):
             Auction.restore(snap)
 
+    def test_conflicting_profiles_for_one_group_are_refused_on_restore(self):
+        snap = _populated().snapshot()
+        conflicting = copy.deepcopy(snap["bids"][0])
+        conflicting["bid_key"] = "akash1other/7/1/0"
+        conflicting["provider"] = "akash1other"
+        conflicting["resource_profile"]["cpu_millicores"] = 501
+        snap["bids"].append(conflicting)
+
+        with pytest.raises(ValueError, match="gseq 7 changed resource profile"):
+            Auction.restore(snap)
+
     def test_an_unknown_preferred_selection_raises(self):
         snap = _populated().snapshot()
         snap["policy"]["preferred_selection"] = "fastest"
@@ -750,6 +761,7 @@ class TestResumeDecidesIdentically:
                 1.0,
                 capacity=ProviderCapacity.from_totals(cpu=(80, 100), gpu=(7, 10)),
                 resource_profile=ResourceProfile(cpu_millicores=1),
+                gseq=1,
             )
         )
         auction.observe(
@@ -759,6 +771,7 @@ class TestResumeDecidesIdentically:
                 2.0,
                 capacity=ProviderCapacity.from_totals(cpu=(20, 100), gpu=(1, 10)),
                 resource_profile=ResourceProfile(cpu_millicores=1),
+                gseq=1,
             )
         )
 
