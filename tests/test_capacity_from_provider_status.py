@@ -131,6 +131,10 @@ def test_sums_across_nodes_rather_than_taking_the_first() -> None:
     cap = from_provider_status(status)
     # 100 free of 200 total on cpu — NOT 10/100 from the first node alone.
     assert cap.cpu == pytest.approx(0.5)
+    assert cap.cpu_millicores_available == 100
+    assert cap.memory_bytes_available == 100
+    assert cap.storage_bytes_available == 100
+    assert cap.gpu_count_available is None
 
 
 def test_booleans_are_rejected_rather_than_counted_as_one() -> None:

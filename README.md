@@ -108,13 +108,21 @@ clock; the core performs no polling or networking.
 ```python
 from decimal import Decimal
 
-from akash_lease_core import Auction, AuctionPolicy, BidObservation
+from akash_lease_core import (
+    Auction,
+    AuctionPolicy,
+    BidObservation,
+    PreferredSelection,
+    ProviderCapacity,
+    ResourceProfile,
+)
 
 auction = Auction(
     AuctionPolicy(
         collection_window_seconds=60,
         preferred_providers=frozenset({"akash1lisbon", "akash1sofia"}),
         eligible_providers=frozenset({"akash1lisbon", "akash1sofia", "akash1fallback"}),
+        preferred_selection=PreferredSelection.EMPTIEST,
     ),
     started_at=0,
 )
@@ -125,6 +133,14 @@ auction.observe(
         price=Decimal("4.2"),
         denom="uact",
         observed_at=58,
+        capacity=ProviderCapacity.from_totals(
+            cpu=(8_000, 10_000),
+            memory=(24 * 2**30, 32 * 2**30),
+        ),
+        resource_profile=ResourceProfile(
+            cpu_millicores=2_000,
+            memory_bytes=4 * 2**30,
+        ),
     )
 )
 
@@ -139,6 +155,25 @@ fallback phase and select the first observed open eligible bid; a fallback that
 already bid can be selected immediately at the phase transition. Provider
 eligibility is policy input—not hard-coded in this package. Mixed denominations
 fail closed because unlike currencies cannot be compared safely.
+
+\`EMPTIEST\` first proves that the provider's absolute free units can fit the
+request, then ranks by the binding free fraction across only the dimensions the
+group requests. A zero GPU request therefore cannot make a CPU-only workload
+follow GPU pressure. Missing absolute capacity for a requested dimension and
+measured-but-insufficient capacity are distinct \`BidRejectionReason\` values.
+Missing \`resource_profile\` never invokes the old all-dimension score: it falls
+back to cheapest with the explicit
+\`emptiest_request_profile_unavailable_fell_back_to_cheapest\` reason.
+
+The profile belongs to each \`BidObservation\`, since bids from one order may
+target groups with different shapes. The adapter must derive it from the final
+submitted SDL group: multiply every service resource by that service's \`count\`,
+then sum all services in the group. Raw per-replica values are not an aggregate
+profile. Capacity snapshots retain both free fractions and absolute free units,
+and auction snapshots carry the exact profile through crash resume.
+
+\`already_selected\` provides anti-affinity among placements evaluated against one
+auction snapshot. It does not provide balancing across separate runs.
 
 ### Crash resume
 

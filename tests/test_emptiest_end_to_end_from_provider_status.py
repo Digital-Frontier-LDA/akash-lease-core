@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from akash_lease_core import from_provider_status
+from akash_lease_core import ResourceProfile, from_provider_status
 from akash_lease_core.auction import (
     Auction,
     AuctionPolicy,
@@ -71,6 +71,7 @@ def _auction(mode: PreferredSelection, fleet):
                 denom="uakt",
                 observed_at=1.0 + index,
                 capacity=_capacity(provider),
+                resource_profile=ResourceProfile(cpu_millicores=100),
             )
         )
     return auction
@@ -141,12 +142,13 @@ def test_an_unreadable_payload_degrades_to_cheapest_and_SAYS_SO() -> None:
                 denom="uakt",
                 observed_at=1.0 + index,
                 capacity=from_provider_status({}),  # unreadable, NOT full
+                resource_profile=ResourceProfile(cpu_millicores=100),
             )
         )
-    result = auction.evaluate(now=11.0)
-    assert result.selected.provider == "helsinki"  # cheapest, because nothing is rankable
-    assert result.selection_reason != "emptiest_preferred"
-    assert "emptiest" in result.selection_reason  # names the mode it could not honour
+    result = auction.evaluate(now=71.0)
+    assert result.selected is None
+    assert result.selection_reason == "no_eligible_open_bids"
+    assert {item.reason for item in result.rejected} == {"required_capacity_unreadable"}
 
 
 @pytest.mark.parametrize("name", ["sofia", "helsinki"])

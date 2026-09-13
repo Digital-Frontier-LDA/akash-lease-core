@@ -1,4 +1,4 @@
-"""Provider capacity as an AVAILABLE FRACTION, for emptiest-first selection.
+"""Provider capacity and exact workload demand for emptiest-first selection.
 
 Motivating measurement (operator, 2026-08-25): the Lisbon datacenter is far
 larger than its siblings and typically sits below 10% utilisation while the
@@ -6,11 +6,9 @@ others run near 50%. Cheapest-first ignores that entirely, so a three-region
 deployment can pile onto providers that have no room while a mostly-empty one
 sits idle. Emptiest-first raises the odds that all three regions place at once.
 
-⚠ WHY A FRACTION AND NOT FREE UNITS. Absolute headroom is not comparable across
-providers of different sizes, and it is not what determines whether a workload
-fits *relative to contention*. The operator asked for percentage, and percentage
-is also the only figure that means the same thing on a large and a small
-provider.
+Fractions rank providers of different sizes. Absolute free units prove that the
+exact group fits before a fraction is allowed to rank it. Neither substitutes
+for the other, so provider snapshots retain both.
 """
 
 from __future__ import annotations
@@ -18,10 +16,61 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 
-__all__ = ["ProviderCapacity"]
+__all__ = ["CapacityFit", "ProviderCapacity", "ResourceProfile"]
 
 _DIMENSIONS = ("cpu", "memory", "storage", "gpu")
+_AVAILABLE_FIELDS = {
+    "cpu": "cpu_millicores_available",
+    "memory": "memory_bytes_available",
+    "storage": "storage_bytes_available",
+    "gpu": "gpu_count_available",
+}
+_REQUEST_FIELDS = {
+    "cpu": "cpu_millicores",
+    "memory": "memory_bytes",
+    "storage": "storage_bytes",
+    "gpu": "gpu_count",
+}
+
+
+class CapacityFit(str, Enum):
+    """Typed outcome of comparing one provider with one exact group request."""
+
+    FIT = "fit"
+    REQUIRED_DIMENSION_UNREADABLE = "required_capacity_unreadable"
+    INSUFFICIENT_CAPACITY = "insufficient_capacity"
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceProfile:
+    """Aggregate resources requested by the exact Akash group behind a bid.
+
+    Values use explicit Akash/provider-status units. Consumers must multiply
+    each service by its ``count`` and sum the final submitted group. Passing a
+    per-replica shape here would make a provider appear to fit a population it
+    cannot actually host.
+    """
+
+    cpu_millicores: int = 0
+    memory_bytes: int = 0
+    storage_bytes: int = 0
+    gpu_count: int = 0
+
+    def __post_init__(self) -> None:
+        for name in _REQUEST_FIELDS.values():
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not self.requested_dimensions:
+            raise ValueError("resource profile must request at least one resource dimension")
+
+    @property
+    def requested_dimensions(self) -> tuple[str, ...]:
+        return tuple(
+            dimension for dimension in _DIMENSIONS if getattr(self, _REQUEST_FIELDS[dimension]) > 0
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +88,10 @@ class ProviderCapacity:
     memory: float | None = None
     storage: float | None = None
     gpu: float | None = None
+    cpu_millicores_available: float | None = None
+    memory_bytes_available: float | None = None
+    storage_bytes_available: float | None = None
+    gpu_count_available: float | None = None
 
     def __post_init__(self) -> None:
         for name in _DIMENSIONS:
@@ -54,6 +107,15 @@ class ProviderCapacity:
                 raise ValueError(f"{name} must be finite -- NaN/inf would win min() silently")
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} must be a fraction in [0,1], got {value}")
+            object.__setattr__(self, name, float(value))
+        for name in _AVAILABLE_FIELDS.values():
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a non-negative real number or None")
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
             object.__setattr__(self, name, float(value))
 
     @classmethod
@@ -72,6 +134,7 @@ class ProviderCapacity:
         for name, pair in dims.items():
             if pair is None:
                 out[name] = None
+                out[_AVAILABLE_FIELDS[name]] = None
                 continue
             available, total = pair
             if not (math.isfinite(available) and math.isfinite(total)):
@@ -80,8 +143,10 @@ class ProviderCapacity:
                 raise ValueError(f"{name}: available and total must be non-negative")
             if total == 0:
                 out[name] = None
+                out[_AVAILABLE_FIELDS[name]] = None
                 continue
             out[name] = min(1.0, available / total)
+            out[_AVAILABLE_FIELDS[name]] = float(available)
         return cls(**out)
 
     def available_fraction(self) -> float | None:
@@ -96,6 +161,25 @@ class ProviderCapacity:
             value for value in (getattr(self, name) for name in _DIMENSIONS) if value is not None
         ]
         return min(readable) if readable else None
+
+    def fit(self, profile: ResourceProfile) -> CapacityFit:
+        """Return whether this provider can fit the exact aggregate request."""
+
+        for dimension in profile.requested_dimensions:
+            fraction = getattr(self, dimension)
+            available = getattr(self, _AVAILABLE_FIELDS[dimension])
+            if fraction is None or available is None:
+                return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+            if available < getattr(profile, _REQUEST_FIELDS[dimension]):
+                return CapacityFit.INSUFFICIENT_CAPACITY
+        return CapacityFit.FIT
+
+    def available_fraction_for(self, profile: ResourceProfile) -> float | None:
+        """Binding fraction across requested dimensions, after a positive fit proof."""
+
+        if self.fit(profile) is not CapacityFit.FIT:
+            return None
+        return min(getattr(self, dimension) for dimension in profile.requested_dimensions)
 
     @property
     def is_readable(self) -> bool:

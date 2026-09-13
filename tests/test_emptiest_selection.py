@@ -18,12 +18,15 @@ from akash_lease_core.auction import (
     BidObservation,
     PreferredSelection,
 )
-from akash_lease_core.capacity import ProviderCapacity
+from akash_lease_core.capacity import ProviderCapacity, ResourceProfile
 
 PREFERRED = frozenset({"lisbon", "sofia", "hel"})
 
 
-def _auction(mode: PreferredSelection, fleet):
+DEFAULT_PROFILE = ResourceProfile(cpu_millicores=1)
+
+
+def _auction(mode: PreferredSelection, fleet, *, profile=DEFAULT_PROFILE):
     policy = AuctionPolicy(
         collection_window_seconds=10,
         preferred_providers=PREFERRED,
@@ -39,6 +42,7 @@ def _auction(mode: PreferredSelection, fleet):
                 denom="uakt",
                 observed_at=1.0 + index,
                 capacity=capacity,
+                resource_profile=profile,
             )
         )
     return auction
@@ -46,9 +50,9 @@ def _auction(mode: PreferredSelection, fleet):
 
 # The measured shape: the big empty one is also the dearest.
 FLEET = [
-    ("lisbon", "9", ProviderCapacity(cpu=0.92, memory=0.90)),
-    ("sofia", "1", ProviderCapacity(cpu=0.50, memory=0.50)),
-    ("hel", "5", ProviderCapacity(cpu=0.40, memory=0.45)),
+    ("lisbon", "9", ProviderCapacity.from_totals(cpu=(92, 100), memory=(90, 100))),
+    ("sofia", "1", ProviderCapacity.from_totals(cpu=(50, 100), memory=(50, 100))),
+    ("hel", "5", ProviderCapacity.from_totals(cpu=(40, 100), memory=(45, 100))),
 ]
 
 
@@ -69,10 +73,14 @@ def test_the_binding_dimension_decides_not_the_roomiest_one() -> None:
     memory-bound workload. Ranking on the maximum -- or an average -- would
     recommend exactly the provider about to refuse the bid."""
     fleet = [
-        ("lisbon", "9", ProviderCapacity(cpu=0.92, memory=0.05)),
-        ("sofia", "1", ProviderCapacity(cpu=0.50, memory=0.50)),
+        ("lisbon", "9", ProviderCapacity.from_totals(cpu=(92, 100), memory=(5, 100))),
+        ("sofia", "1", ProviderCapacity.from_totals(cpu=(50, 100), memory=(50, 100))),
     ]
-    result = _auction(PreferredSelection.EMPTIEST, fleet).evaluate(now=11.0)
+    result = _auction(
+        PreferredSelection.EMPTIEST,
+        fleet,
+        profile=ResourceProfile(cpu_millicores=1, memory_bytes=1),
+    ).evaluate(now=11.0)
     assert result.selected.provider == "sofia"
 
 
@@ -80,9 +88,9 @@ def test_a_degraded_selection_does_not_report_as_the_mode_requested() -> None:
     """⛔ Silently returning ``cheapest_preferred`` would make an UNMEASURABLE
     fleet indistinguishable from a measured one that happened to agree."""
     fleet = [(p, price, None) for p, price, _ in FLEET]
-    result = _auction(PreferredSelection.EMPTIEST, fleet).evaluate(now=11.0)
+    result = _auction(PreferredSelection.EMPTIEST, fleet, profile=None).evaluate(now=11.0)
     assert result.selected.provider == "sofia"
-    assert result.selection_reason == "emptiest_unavailable_fell_back_to_cheapest"
+    assert result.selection_reason == "emptiest_request_profile_unavailable_fell_back_to_cheapest"
 
 
 def test_three_placements_on_ONE_snapshot_land_on_three_providers() -> None:
@@ -116,7 +124,7 @@ def test_KNOWN_NEGATIVE_without_anti_affinity_all_three_pile_onto_one() -> None:
 def test_anti_affinity_deprioritises_it_does_not_exclude() -> None:
     """⚠ If the already-taken provider is the ONLY preferred bidder, taking it
     beats failing to place. This changes the ORDER, never the eligibility."""
-    fleet = [("lisbon", "9", ProviderCapacity(cpu=0.92))]
+    fleet = [("lisbon", "9", ProviderCapacity.from_totals(cpu=(92, 100)))]
     result = _auction(PreferredSelection.EMPTIEST, fleet).evaluate(
         now=11.0, already_selected=frozenset({"lisbon"})
     )

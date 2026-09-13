@@ -43,14 +43,15 @@ from akash_lease_core.auction import (
     UnsupportedSnapshotVersion,
     _codec_for,
 )
-from akash_lease_core.capacity import ProviderCapacity
+from akash_lease_core.capacity import ProviderCapacity, ResourceProfile
 
 # The dataclass shapes this schema version was written against. See the module
 # docstring: these are asserted, not documented, because a count in prose is a
 # claim nobody re-checks.
-BID_OBSERVATION_FIELDS = 9
+BID_OBSERVATION_FIELDS = 10
 AUCTION_POLICY_FIELDS = 8
-PROVIDER_CAPACITY_FIELDS = 4
+PROVIDER_CAPACITY_FIELDS = 8
+RESOURCE_PROFILE_FIELDS = 4
 
 
 def _modules_imported_by(source: str) -> set[str]:
@@ -81,7 +82,7 @@ def _policy(**overrides: object) -> AuctionPolicy:
         "excluded_providers": frozenset({"akash1blocked"}),
         "required_proofs": frozenset({"gpu-attested"}),
         "preferred_selection": PreferredSelection.CHEAPEST,
-        "version": "provider-auction/v2",
+        "version": "provider-auction/v3",
     }
     base.update(overrides)
     return AuctionPolicy(**base)  # type: ignore[arg-type]
@@ -97,6 +98,7 @@ def _bid(
     denom: str = "uact",
     proofs: tuple[str, ...] = (),
     capacity: ProviderCapacity | None = None,
+    resource_profile: ResourceProfile | None = None,
     gseq: int | None = None,
 ) -> BidObservation:
     return BidObservation(
@@ -108,6 +110,7 @@ def _bid(
         state=state,
         proofs=proofs,
         capacity=capacity,
+        resource_profile=resource_profile,
         gseq=gseq,
     )
 
@@ -122,7 +125,13 @@ def _populated() -> Auction:
             "4.2",
             3.5,
             proofs=("gpu-attested", "audited"),
-            capacity=ProviderCapacity(cpu=0.9, memory=0.5, storage=None, gpu=0.25),
+            capacity=ProviderCapacity.from_totals(
+                cpu=(900, 1000),
+                memory=(500, 1000),
+                storage=(0, 0),
+                gpu=(1, 4),
+            ),
+            resource_profile=ResourceProfile(cpu_millicores=500, memory_bytes=1024),
             gseq=7,
         )
     )
@@ -234,6 +243,11 @@ class TestFieldCompleteness:
 
         assert set(encoded["capacity"]) == {spec.name for spec in fields(ProviderCapacity)}
 
+    def test_every_resource_profile_field_is_written_to_the_snapshot(self):
+        encoded = _populated().snapshot()["bids"][0]
+
+        assert set(encoded["resource_profile"]) == {spec.name for spec in fields(ResourceProfile)}
+
     def test_the_field_counts_this_schema_version_was_written_against(self):
         """Deliberately a COUNT, and deliberately brittle.
 
@@ -246,6 +260,7 @@ class TestFieldCompleteness:
         assert len(fields(BidObservation)) == BID_OBSERVATION_FIELDS
         assert len(fields(AuctionPolicy)) == AUCTION_POLICY_FIELDS
         assert len(fields(ProviderCapacity)) == PROVIDER_CAPACITY_FIELDS
+        assert len(fields(ResourceProfile)) == RESOURCE_PROFILE_FIELDS
 
     def test_proofs_survives_the_round_trip(self):
         """PR #22's incident by name: ``proofs`` is the field the hand-written
@@ -263,6 +278,14 @@ class TestFieldCompleteness:
 
         assert restored._latest_by_key["akash1lisbon/1/1/0"].gseq == 7
         assert restored._latest_by_key["akash1sofia/1/1/0"].gseq is None
+
+    def test_the_exact_resource_profile_survives_and_absence_stays_none(self):
+        restored = Auction.restore(_populated().snapshot())
+
+        assert restored._latest_by_key["akash1lisbon/1/1/0"].resource_profile == (
+            ResourceProfile(cpu_millicores=500, memory_bytes=1024)
+        )
+        assert restored._latest_by_key["akash1sofia/1/1/0"].resource_profile is None
 
     def test_a_field_whose_type_has_no_codec_raises_instead_of_being_dropped(self):
         """The guard that fires the day someone adds a field of a new type.
@@ -351,7 +374,16 @@ class TestNoneNeverBecomesAValue:
         restored = Auction.restore(_populated().snapshot())
         capacity = restored._latest_by_key["akash1lisbon/1/1/0"].capacity
 
-        assert capacity == ProviderCapacity(cpu=0.9, memory=0.5, storage=None, gpu=0.25)
+        assert capacity == ProviderCapacity(
+            cpu=0.9,
+            memory=0.5,
+            storage=None,
+            gpu=0.25,
+            cpu_millicores_available=900,
+            memory_bytes_available=500,
+            storage_bytes_available=None,
+            gpu_count_available=1,
+        )
         assert capacity.storage is None
         assert capacity.storage != 0.0
 
@@ -712,10 +744,22 @@ class TestResumeDecidesIdentically:
         )
         auction = Auction(policy, started_at=0)
         auction.observe(
-            _bid("akash1lisbon", "9.0", 1.0, capacity=ProviderCapacity(cpu=0.8, gpu=0.7))
+            _bid(
+                "akash1lisbon",
+                "9.0",
+                1.0,
+                capacity=ProviderCapacity.from_totals(cpu=(80, 100), gpu=(7, 10)),
+                resource_profile=ResourceProfile(cpu_millicores=1),
+            )
         )
         auction.observe(
-            _bid("akash1sofia", "1.0", 2.0, capacity=ProviderCapacity(cpu=0.2, gpu=0.1))
+            _bid(
+                "akash1sofia",
+                "1.0",
+                2.0,
+                capacity=ProviderCapacity.from_totals(cpu=(20, 100), gpu=(1, 10)),
+                resource_profile=ResourceProfile(cpu_millicores=1),
+            )
         )
 
         resumed = Auction.restore(auction.snapshot())
