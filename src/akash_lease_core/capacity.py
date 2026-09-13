@@ -137,6 +137,11 @@ class ProviderCapacity:
                 out[_AVAILABLE_FIELDS[name]] = None
                 continue
             available, total = pair
+            if any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in (available, total)
+            ):
+                raise ValueError(f"{name}: available and total must be real numbers")
             if not (math.isfinite(available) and math.isfinite(total)):
                 raise ValueError(f"{name}: available and total must be finite")
             if total < 0 or available < 0:

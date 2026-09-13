@@ -233,6 +233,55 @@ def test_profile_without_a_group_cannot_authorize_fit_or_ranking() -> None:
     assert result.rejected[0].reason is BidRejectionReason.RESOURCE_PROFILE_GROUP_UNBOUND
 
 
+def test_cheapest_cannot_select_a_profile_whose_group_is_unbound() -> None:
+    auction = Auction(
+        AuctionPolicy(
+            collection_window_seconds=0,
+            fallback_window_seconds=0,
+            preferred_providers=frozenset({"lisbon", "sofia"}),
+            preferred_selection=PreferredSelection.CHEAPEST,
+        ),
+        started_at=0,
+    )
+    capacity = _capacity(cpu=(900, 1000))
+    auction.observe(
+        BidObservation(
+            bid_key="invalid-cheaper",
+            provider="lisbon",
+            price=Decimal("1"),
+            denom="uakt",
+            observed_at=0,
+            capacity=capacity,
+            resource_profile=ResourceProfile(cpu_millicores=10),
+            gseq=None,
+        )
+    )
+    # Legacy consumers supplied neither profile nor group. That shape remains
+    # eligible; missing evidence is not falsely presented as group-bound evidence.
+    auction.observe(
+        BidObservation(
+            bid_key="legacy-valid",
+            provider="sofia",
+            price=Decimal("9"),
+            denom="uakt",
+            observed_at=0,
+            capacity=capacity,
+            resource_profile=None,
+            gseq=None,
+        )
+    )
+
+    result = auction.evaluate(now=0)
+
+    assert result.status is AuctionStatus.DECIDED
+    assert result.selected is not None
+    assert result.selected.bid_key == "legacy-valid"
+    assert result.selection_reason is SelectionReason.CHEAPEST_PREFERRED
+    assert [(item.bid_key, item.reason) for item in result.rejected] == [
+        ("invalid-cheaper", BidRejectionReason.RESOURCE_PROFILE_GROUP_UNBOUND)
+    ]
+
+
 def test_same_group_conflicting_profiles_are_rejected() -> None:
     auction = Auction(AuctionPolicy(), started_at=0)
     capacity = _capacity(cpu=(900, 1000), memory=(900, 1000))

@@ -781,11 +781,7 @@ class Auction:
                         BidRejectionReason.BID_OBSERVED_AFTER_FALLBACK_DEADLINE,
                     )
                 )
-            elif (
-                self.policy.preferred_selection is PreferredSelection.EMPTIEST
-                and observation.resource_profile is not None
-                and observation.gseq is None
-            ):
+            elif observation.resource_profile is not None and observation.gseq is None:
                 rejected.append(
                     self._reject(observation, BidRejectionReason.RESOURCE_PROFILE_GROUP_UNBOUND)
                 )
