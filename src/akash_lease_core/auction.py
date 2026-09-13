@@ -7,7 +7,7 @@ bids from Console, chain RPC, or another transport, feed observations into an
 The contract is intentionally small:
 
 * collect for the complete configured window (0--60 seconds),
-* then choose the cheapest open preferred bid when one exists,
+* then choose an open preferred bid under the configured selection policy,
 * otherwise choose the first observed open eligible fallback bid,
 * never compare prices expressed in different denominations.
 
@@ -38,7 +38,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from .capacity import ProviderCapacity
+from .capacity import CapacityFit, ProviderCapacity, ResourceProfile
 
 
 class PreferredSelection(str, Enum):
@@ -65,6 +65,32 @@ class AuctionStatus(str, Enum):
     EXPIRED = "expired"
 
 
+class BidRejectionReason(str, Enum):
+    """Stable machine reasons for excluding one observed bid."""
+
+    BID_NOT_OPEN = "bid_not_open"
+    PROVIDER_EXCLUDED = "provider_excluded"
+    PROVIDER_NOT_ELIGIBLE = "provider_not_eligible"
+    BID_OBSERVED_AFTER_FALLBACK_DEADLINE = "bid_observed_after_fallback_deadline"
+    REQUIRED_CAPACITY_UNREADABLE = CapacityFit.REQUIRED_DIMENSION_UNREADABLE.value
+    INSUFFICIENT_CAPACITY = CapacityFit.INSUFFICIENT_CAPACITY.value
+    RESOURCE_PROFILE_GROUP_UNBOUND = "resource_profile_group_unbound"
+
+
+class SelectionReason(str, Enum):
+    """Stable machine reasons for an auction state or decision."""
+
+    COLLECTION_WINDOW_OPEN = "collection_window_open"
+    WAITING_FOR_FIRST_ELIGIBLE_FALLBACK = "waiting_for_first_eligible_fallback"
+    NO_ELIGIBLE_OPEN_BIDS = "no_eligible_open_bids"
+    EMPTIEST_PREFERRED = "emptiest_preferred"
+    EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST = (
+        "emptiest_request_profile_unavailable_fell_back_to_cheapest"
+    )
+    CHEAPEST_PREFERRED = "cheapest_preferred"
+    FIRST_ELIGIBLE_FALLBACK = "first_eligible_fallback"
+
+
 class MixedBidDenominations(ValueError):
     """Raised when a candidate pool contains currencies that cannot be compared."""
 
@@ -83,6 +109,10 @@ class BidObservation:
     #: Provider headroom at observation time. ``None`` = not measured,
     #: which is distinct from "measured as full" -- see ProviderCapacity.
     capacity: ProviderCapacity | None = None
+    #: Aggregate request for the exact Akash group this bid targets. Consumers
+    #: derive it from the final submitted SDL, multiplying each service by its
+    #: count. ``None`` is explicit missing evidence and degrades EMPTIEST.
+    resource_profile: ResourceProfile | None = None
     #: The order GROUP this bid is for.
     #:
     #: ⛔ ``None`` means NOT SUPPLIED, and it must never be read as 1.
@@ -132,7 +162,7 @@ class AuctionPolicy:
     excluded_providers: frozenset[str] = field(default_factory=frozenset)
     required_proofs: frozenset[str] = field(default_factory=frozenset)
     preferred_selection: PreferredSelection = PreferredSelection.CHEAPEST
-    version: str = "provider-auction/v2"
+    version: str = "provider-auction/v3"
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.collection_window_seconds):
@@ -158,7 +188,7 @@ class RejectedBid:
 
     bid_key: str
     provider: str
-    reason: str
+    reason: BidRejectionReason
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +202,7 @@ class AuctionResult:
     fallback_deadline: float
     evaluated_at: float
     selected: BidObservation | None
-    selection_reason: str
+    selection_reason: SelectionReason
     considered: tuple[BidObservation, ...] = ()
     rejected: tuple[RejectedBid, ...] = ()
     missing_required_proofs: tuple[str, ...] = ()
@@ -185,7 +215,7 @@ class AuctionResult:
 # auction decided" versus "how was this auction written down" -- and one string
 # doing both means a serialisation change cannot be shipped without claiming the
 # policy also changed.
-AUCTION_SNAPSHOT_VERSION = "auction-snapshot/v1"
+AUCTION_SNAPSHOT_VERSION = "auction-snapshot/v2"
 
 #: Exactly the top-level keys of a snapshot at ``AUCTION_SNAPSHOT_VERSION``.
 _SNAPSHOT_KEYS = frozenset({"version", "scope", "started_at", "policy", "bids"})
@@ -249,6 +279,10 @@ def _encode_capacity(value: ProviderCapacity | None) -> dict[str, object] | None
     return None if value is None else _encode_dataclass(value)
 
 
+def _encode_resource_profile(value: ResourceProfile | None) -> dict[str, object] | None:
+    return None if value is None else _encode_dataclass(value)
+
+
 def _decode_str(value: object, where: str) -> str:
     if not isinstance(value, str):
         raise ValueError(f"{where}: expected a string, got {type(value).__name__}")
@@ -273,6 +307,12 @@ def _decode_int_or_none(value: object, where: str) -> int | None:
     # A bool is an int in Python; a ``true`` in the blob would silently mean 1.
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{where}: expected an integer or null, got {type(value).__name__}")
+    return value
+
+
+def _decode_int(value: object, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{where}: expected an integer, got {type(value).__name__}")
     return value
 
 
@@ -319,6 +359,12 @@ def _decode_capacity(value: object, where: str) -> ProviderCapacity | None:
     return ProviderCapacity(**_decode_dataclass(ProviderCapacity, value, where))
 
 
+def _decode_resource_profile(value: object, where: str) -> ResourceProfile | None:
+    if value is None:
+        return None
+    return ResourceProfile(**_decode_dataclass(ResourceProfile, value, where))
+
+
 def _decode_preferred_selection(value: object, where: str) -> PreferredSelection:
     text = _decode_str(value, where)
     try:
@@ -342,12 +388,14 @@ _CODECS: dict[str, tuple[_Encode, _Decode]] = {
     "str": (_encode_identity, _decode_str),
     "float": (_encode_float, _decode_float),
     "float | None": (_encode_float_or_none, _decode_float_or_none),
+    "int": (_encode_identity, _decode_int),
     "int | None": (_encode_identity, _decode_int_or_none),
     "Decimal": (_encode_decimal, _decode_decimal),
     "tuple[str, ...]": (_encode_list, _decode_str_tuple),
     "frozenset[str]": (_encode_sorted, _decode_str_frozenset),
     "frozenset[str] | None": (_encode_sorted_or_none, _decode_str_frozenset_or_none),
     "ProviderCapacity | None": (_encode_capacity, _decode_capacity),
+    "ResourceProfile | None": (_encode_resource_profile, _decode_resource_profile),
     "PreferredSelection": (_encode_enum, _decode_preferred_selection),
 }
 
@@ -434,6 +482,32 @@ class Auction:
         self.deadline = started_at + policy.collection_window_seconds
         self.fallback_deadline = self.deadline + policy.fallback_window_seconds
         self._latest_by_key: dict[str, BidObservation] = {}
+        self._resource_profile_by_gseq: dict[int, ResourceProfile] = {}
+
+    def _bind_resource_profile(self, observation: BidObservation) -> BidObservation:
+        """Bind one immutable aggregate profile to each readable group sequence."""
+
+        if observation.gseq is None:
+            return observation
+        known = self._resource_profile_by_gseq.get(observation.gseq)
+        if observation.resource_profile is None:
+            return observation if known is None else replace(observation, resource_profile=known)
+        if known is not None and observation.resource_profile != known:
+            raise ValueError(
+                f"gseq {observation.gseq} changed resource profile from {known!r} "
+                f"to {observation.resource_profile!r}"
+            )
+        if known is None:
+            self._resource_profile_by_gseq[observation.gseq] = observation.resource_profile
+            # Observation order cannot decide whether an earlier bid remains
+            # unprofiled. Once exact group evidence arrives, apply it to every
+            # already-observed bid for that group.
+            for bid_key, current in tuple(self._latest_by_key.items()):
+                if current.gseq == observation.gseq and current.resource_profile is None:
+                    self._latest_by_key[bid_key] = replace(
+                        current, resource_profile=observation.resource_profile
+                    )
+        return observation
 
     def observe(self, observation: BidObservation) -> None:
         """Record a `BidObservation`, preserving first arrival, refreshing mutable state.
@@ -445,7 +519,7 @@ class Auction:
         degenerates into a tie-break on (provider, bid_key) and the fallback
         selection chooses by last index, not by arrival.
 
-        ⇒ Mutable fields (price, state) ARE refreshed on later observations,
+        ⇒ Mutable fields (price, state, proofs, capacity) ARE refreshed on later observations,
         because a bid can legitimately change (open → closed) while arrival
         cannot. BidObservation is frozen, so refreshing mutable fields means
         rebuilding the instance with the FIRST `observed_at` preserved.
@@ -457,14 +531,29 @@ class Auction:
         this version, the adapter-level guard can be dropped.
         """
         current = self._latest_by_key.get(observation.bid_key)
-        if current is None:
-            self._latest_by_key[observation.bid_key] = observation
-            return
-        if current.provider != observation.provider:
+        if current is not None and current.provider != observation.provider:
             raise ValueError(
                 f"bid_key {observation.bid_key!r} changed provider "
                 f"from {current.provider!r} to {observation.provider!r}"
             )
+        if current is not None and current.gseq is not None:
+            if observation.gseq is None:
+                observation = replace(observation, gseq=current.gseq)
+            elif observation.gseq != current.gseq:
+                raise ValueError(
+                    f"bid_key {observation.bid_key!r} changed gseq "
+                    f"from {current.gseq} to {observation.gseq}"
+                )
+        if (
+            current is not None
+            and current.resource_profile is not None
+            and observation.resource_profile is None
+        ):
+            observation = replace(observation, resource_profile=current.resource_profile)
+        observation = self._bind_resource_profile(observation)
+        if current is None:
+            self._latest_by_key[observation.bid_key] = observation
+            return
         # Re-observation: KEEP first arrival, REFRESH mutable state.
         # `replace` rather than a field-by-field rebuild: this is FIELD-COMPLETE by
         # construction, so a field added to BidObservation later cannot be silently
@@ -472,9 +561,10 @@ class Auction:
         # lost `proofs` to its default of () on every re-observation — the same defect
         # class as the one this method exists to fix, one field over.
         #
-        # observed_at is the ONLY field taken from the stored copy: it is the bid's
-        # arrival, not its latest sighting. Everything else (price, state, proofs) is
-        # mutable and the newest observation is authoritative.
+        # observed_at always comes from the stored copy: it is the bid's arrival,
+        # not its latest sighting. An established gseq and known resource profile
+        # also survive later omissions; unlike price/state, they bind identity and
+        # exact demand rather than reporting mutable transport state.
         self._latest_by_key[observation.bid_key] = replace(
             observation, observed_at=current.observed_at
         )
@@ -646,7 +736,8 @@ class Auction:
             observations[observation.bid_key] = observation
 
         auction = cls(policy, started_at=new_started_at)
-        auction._latest_by_key = observations
+        for observation in observations.values():
+            auction.observe(observation)
         return auction
 
     def evaluate(
@@ -664,7 +755,7 @@ class Auction:
                 status=AuctionStatus.COLLECTING,
                 now=now,
                 selected=None,
-                reason="collection_window_open",
+                reason=SelectionReason.COLLECTION_WINDOW_OPEN,
             )
 
         candidates: list[BidObservation] = []
@@ -673,16 +764,46 @@ class Auction:
             self._latest_by_key.values(), key=lambda item: (item.provider, item.bid_key)
         ):
             if observation.state.lower() != "open":
-                rejected.append(self._reject(observation, "bid_not_open"))
+                rejected.append(self._reject(observation, BidRejectionReason.BID_NOT_OPEN))
             elif observation.provider in self.policy.excluded_providers:
-                rejected.append(self._reject(observation, "provider_excluded"))
+                rejected.append(self._reject(observation, BidRejectionReason.PROVIDER_EXCLUDED))
             elif (
                 self.policy.eligible_providers is not None
                 and observation.provider not in self.policy.eligible_providers
             ):
-                rejected.append(self._reject(observation, "provider_not_eligible"))
+                rejected.append(
+                    self._reject(observation, BidRejectionReason.PROVIDER_NOT_ELIGIBLE)
+                )
             elif observation.observed_at > min(now, self.fallback_deadline):
-                rejected.append(self._reject(observation, "bid_observed_after_fallback_deadline"))
+                rejected.append(
+                    self._reject(
+                        observation,
+                        BidRejectionReason.BID_OBSERVED_AFTER_FALLBACK_DEADLINE,
+                    )
+                )
+            elif observation.resource_profile is not None and observation.gseq is None:
+                rejected.append(
+                    self._reject(observation, BidRejectionReason.RESOURCE_PROFILE_GROUP_UNBOUND)
+                )
+            elif (
+                self.policy.preferred_selection is PreferredSelection.EMPTIEST
+                and observation.resource_profile is not None
+            ):
+                fit = (
+                    CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+                    if observation.capacity is None
+                    else observation.capacity.fit(observation.resource_profile)
+                )
+                if fit is CapacityFit.REQUIRED_DIMENSION_UNREADABLE:
+                    rejected.append(
+                        self._reject(observation, BidRejectionReason.REQUIRED_CAPACITY_UNREADABLE)
+                    )
+                elif fit is CapacityFit.INSUFFICIENT_CAPACITY:
+                    rejected.append(
+                        self._reject(observation, BidRejectionReason.INSUFFICIENT_CAPACITY)
+                    )
+                else:
+                    candidates.append(observation)
             else:
                 candidates.append(observation)
 
@@ -691,7 +812,7 @@ class Auction:
                 status=AuctionStatus.COLLECTING,
                 now=now,
                 selected=None,
-                reason="waiting_for_first_eligible_fallback",
+                reason=SelectionReason.WAITING_FOR_FIRST_ELIGIBLE_FALLBACK,
                 rejected=tuple(rejected),
             )
 
@@ -700,7 +821,7 @@ class Auction:
                 status=AuctionStatus.EXPIRED,
                 now=now,
                 selected=None,
-                reason="no_eligible_open_bids",
+                reason=SelectionReason.NO_ELIGIBLE_OPEN_BIDS,
                 rejected=tuple(rejected),
             )
 
@@ -720,10 +841,8 @@ class Auction:
 
         if preferred:
             emptiest = self.policy.preferred_selection is PreferredSelection.EMPTIEST
-            readable = [
-                item for item in pool if item.capacity is not None and item.capacity.is_readable
-            ]
-            if emptiest and readable:
+            profiles_complete = all(item.resource_profile is not None for item in pool)
+            if emptiest and profiles_complete:
                 # ⭐ ANTI-AFFINITY FIRST, headroom second.
                 #
                 # A multi-region deployment evaluates several auctions against ONE
@@ -739,12 +858,16 @@ class Auction:
                 taken = already_selected or frozenset()
 
                 def rank(item: BidObservation) -> tuple:
-                    frac = item.capacity.available_fraction()  # type: ignore[union-attr]
+                    if item.capacity is None or item.resource_profile is None:
+                        raise AssertionError("fit-checked pool lost capacity evidence")
+                    frac = item.capacity.available_fraction_for(item.resource_profile)
+                    if frac is None:
+                        raise AssertionError("fit-checked pool lost its requested-dimension score")
                     return (item.provider in taken, -frac, item.price, item.provider, item.bid_key)
 
-                selected = min(readable, key=rank)
-                reason = "emptiest_preferred"
-                considered = tuple(sorted(readable, key=rank))
+                selected = min(pool, key=rank)
+                reason = SelectionReason.EMPTIEST_PREFERRED
+                considered = tuple(sorted(pool, key=rank))
             else:
                 selected = min(pool, key=lambda item: (item.price, item.provider, item.bid_key))
                 # ⛔ A degraded selection MUST NOT report as the mode that was
@@ -752,16 +875,16 @@ class Auction:
                 # make an unmeasurable fleet indistinguishable from a fleet that
                 # was measured and happened to agree.
                 reason = (
-                    "emptiest_unavailable_fell_back_to_cheapest"
+                    SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
                     if emptiest
-                    else "cheapest_preferred"
+                    else SelectionReason.CHEAPEST_PREFERRED
                 )
                 considered = tuple(
                     sorted(pool, key=lambda item: (item.price, item.provider, item.bid_key))
                 )
         else:
             selected = min(pool, key=lambda item: (item.observed_at, item.provider, item.bid_key))
-            reason = "first_eligible_fallback"
+            reason = SelectionReason.FIRST_ELIGIBLE_FALLBACK
             considered = tuple(
                 sorted(pool, key=lambda item: (item.observed_at, item.provider, item.bid_key))
             )
@@ -777,7 +900,7 @@ class Auction:
         )
 
     @staticmethod
-    def _reject(observation: BidObservation, reason: str) -> RejectedBid:
+    def _reject(observation: BidObservation, reason: BidRejectionReason) -> RejectedBid:
         return RejectedBid(
             bid_key=observation.bid_key,
             provider=observation.provider,
@@ -790,7 +913,7 @@ class Auction:
         status: AuctionStatus,
         now: float,
         selected: BidObservation | None,
-        reason: str,
+        reason: SelectionReason,
         considered: tuple[BidObservation, ...] = (),
         rejected: tuple[RejectedBid, ...] = (),
         missing_required_proofs: tuple[str, ...] = (),

@@ -37,7 +37,7 @@ from pathlib import Path
 
 import pytest
 
-from akash_lease_core import from_provider_status
+from akash_lease_core import ResourceProfile, from_provider_status
 from akash_lease_core.auction import (
     Auction,
     AuctionPolicy,
@@ -71,6 +71,8 @@ def _auction(mode: PreferredSelection, fleet):
                 denom="uakt",
                 observed_at=1.0 + index,
                 capacity=_capacity(provider),
+                resource_profile=ResourceProfile(cpu_millicores=100),
+                gseq=1,
             )
         )
     return auction
@@ -118,14 +120,8 @@ def test_KNOWN_NEGATIVE_cheapest_picks_helsinki_from_the_same_payloads() -> None
     assert result.selection_reason == "cheapest_preferred"
 
 
-def test_an_unreadable_payload_degrades_to_cheapest_and_SAYS_SO() -> None:
-    """⛔ A provider whose /status cannot be read must not be ranked as full.
-
-    The capacity is None, so emptiest has nothing to rank on and falls back --
-    and the reason string must report the fallback rather than claiming the mode
-    it was asked for. An UNMEASURABLE fleet reporting 'emptiest_preferred' would
-    be indistinguishable from a working one.
-    """
+def test_an_unreadable_required_dimension_is_typed_rejected() -> None:
+    """⛔ A provider whose required capacity cannot be read cannot prove fit."""
     policy = AuctionPolicy(
         collection_window_seconds=10,
         preferred_providers=PREFERRED,
@@ -141,12 +137,14 @@ def test_an_unreadable_payload_degrades_to_cheapest_and_SAYS_SO() -> None:
                 denom="uakt",
                 observed_at=1.0 + index,
                 capacity=from_provider_status({}),  # unreadable, NOT full
+                resource_profile=ResourceProfile(cpu_millicores=100),
+                gseq=1,
             )
         )
-    result = auction.evaluate(now=11.0)
-    assert result.selected.provider == "helsinki"  # cheapest, because nothing is rankable
-    assert result.selection_reason != "emptiest_preferred"
-    assert "emptiest" in result.selection_reason  # names the mode it could not honour
+    result = auction.evaluate(now=71.0)
+    assert result.selected is None
+    assert result.selection_reason == "no_eligible_open_bids"
+    assert {item.reason for item in result.rejected} == {"required_capacity_unreadable"}
 
 
 @pytest.mark.parametrize("name", ["sofia", "helsinki"])

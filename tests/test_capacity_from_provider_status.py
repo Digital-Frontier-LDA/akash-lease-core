@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from akash_lease_core import ProviderCapacity, from_provider_status
+from akash_lease_core import CapacityFit, ProviderCapacity, ResourceProfile, from_provider_status
 
 FIXTURE = Path(__file__).parent / "fixtures" / "provider_status_sofia.json"
 
@@ -131,6 +131,58 @@ def test_sums_across_nodes_rather_than_taking_the_first() -> None:
     cap = from_provider_status(status)
     # 100 free of 200 total on cpu — NOT 10/100 from the first node alone.
     assert cap.cpu == pytest.approx(0.5)
+    assert cap.cpu_millicores_available == 100
+    assert cap.memory_bytes_available == 100
+    assert cap.storage_bytes_available == 100
+    assert cap.gpu_count_available is None
+
+
+def test_live_shaped_overreported_cpu_is_unreadable_not_clamped_fit_evidence() -> None:
+    """A provider once reported free CPU above allocatable CPU.
+
+    Keeping the oversized absolute value while clamping only its fraction to
+    100% would let malformed status data prove a large workload fits.
+    """
+    status = _one_node(
+        {
+            "cpu": 1_000,
+            "memory": 32 * 2**30,
+            "storage_ephemeral": 100 * 2**30,
+        },
+        {
+            "cpu": 1_200,
+            "memory": 24 * 2**30,
+            "storage_ephemeral": 90 * 2**30,
+        },
+    )
+
+    cap = from_provider_status(status)
+
+    assert cap.cpu is None
+    assert cap.cpu_millicores_available is None
+    assert cap.memory == pytest.approx(0.75)
+    assert cap.memory_bytes_available == 24 * 2**30
+
+
+def test_from_totals_rejects_available_above_total_instead_of_clamping() -> None:
+    with pytest.raises(ValueError, match="must not exceed total"):
+        ProviderCapacity.from_totals(cpu=(1_200, 1_000))
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        pytest.param((True, 100), id="available-bool"),
+        pytest.param((1, True), id="total-bool"),
+    ],
+)
+def test_from_totals_rejects_boolean_quantities_before_they_can_prove_fit(pair) -> None:
+    profile = ResourceProfile(cpu_millicores=1)
+    coerced = ProviderCapacity.from_totals(cpu=(int(pair[0]), int(pair[1])))
+    assert coerced.fit(profile) is CapacityFit.FIT
+
+    with pytest.raises(ValueError, match="must be real numbers"):
+        ProviderCapacity.from_totals(cpu=pair)
 
 
 def test_booleans_are_rejected_rather_than_counted_as_one() -> None:

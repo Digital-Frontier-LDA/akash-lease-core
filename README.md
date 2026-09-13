@@ -43,7 +43,7 @@ purpose: a third copy is the failure centralising the code was meant to remove.
 
 ⇒ For a §-numbered mandate, read **df-wiki**. For the CI contract, read **df-cicd**.
 
-### Consumer versions — measured 2026-09-11
+### Consumer versions — measured 2026-09-13
 
 Adoption of the *code* is complete: across just-akash (18 importers), Blazing-Back (14) and
 akash-github-runner (3) there are **zero local re-definitions** of `qualified_set`,
@@ -53,7 +53,7 @@ logic.
 The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.13.0
+akash-lease-core main   0.14.0
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -65,7 +65,7 @@ docstring discussing older behaviour. #33 read those as live pins and reported a
 range inside one consumer; the resolved skew is a single version. A naive grep counts prose as
 configuration, and here it inflated the finding by two versions.
 
-⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.13.0` contains behaviour
+⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.14.0` contains behaviour
 changes that matter has not been determined. Upgrading consumers onto a version nobody has
 diffed is how a shared library becomes an incident — establish the intended pin contract
 (#32) first.
@@ -108,13 +108,21 @@ clock; the core performs no polling or networking.
 ```python
 from decimal import Decimal
 
-from akash_lease_core import Auction, AuctionPolicy, BidObservation
+from akash_lease_core import (
+    Auction,
+    AuctionPolicy,
+    BidObservation,
+    PreferredSelection,
+    ProviderCapacity,
+    ResourceProfile,
+)
 
 auction = Auction(
     AuctionPolicy(
         collection_window_seconds=60,
         preferred_providers=frozenset({"akash1lisbon", "akash1sofia"}),
         eligible_providers=frozenset({"akash1lisbon", "akash1sofia", "akash1fallback"}),
+        preferred_selection=PreferredSelection.EMPTIEST,
     ),
     started_at=0,
 )
@@ -125,6 +133,14 @@ auction.observe(
         price=Decimal("4.2"),
         denom="uact",
         observed_at=58,
+        capacity=ProviderCapacity.from_totals(
+            cpu=(8_000, 10_000),
+            memory=(24 * 2**30, 32 * 2**30),
+        ),
+        resource_profile=ResourceProfile(
+            cpu_millicores=2_000,
+            memory_bytes=4 * 2**30,
+        ),
     )
 )
 
@@ -134,11 +150,36 @@ assert decision.selected.provider == "akash1lisbon"
 ```
 
 The invariant is: collect for the complete configured window (0–60 seconds),
-then choose the cheapest open preferred bid. If none exists, enter a bounded
-fallback phase and select the first observed open eligible bid; a fallback that
-already bid can be selected immediately at the phase transition. Provider
+then choose an open preferred bid under the configured selection policy. If none
+exists, enter a bounded fallback phase and select the first observed open
+eligible bid; a fallback that already bid can be selected immediately at the
+phase transition. Provider
 eligibility is policy input—not hard-coded in this package. Mixed denominations
 fail closed because unlike currencies cannot be compared safely.
+
+`EMPTIEST` first proves that the provider's absolute free units can fit the
+request, then ranks by the binding free fraction across only the dimensions the
+group requests. A zero GPU request therefore cannot make a CPU-only workload
+follow GPU pressure. Missing absolute capacity for a requested dimension and
+measured-but-insufficient capacity are distinct `BidRejectionReason` values.
+Missing `resource_profile` never invokes the old all-dimension score: it falls
+back to cheapest with the explicit
+`emptiest_request_profile_unavailable_fell_back_to_cheapest` reason.
+
+The profile belongs to each `BidObservation`, since bids from one order may
+target groups with different shapes. The adapter must derive it from the final
+submitted SDL group: multiply every service resource by that service's `count`,
+then sum all services in the group. Raw per-replica values are not an aggregate
+profile. Capacity snapshots retain both free fractions and absolute free units.
+A non-empty profile without a readable `gseq` is rejected because the core
+cannot prove which group it describes. Once observed, a group's profile is
+immutable; later missing observations inherit it and a conflicting non-empty
+profile is refused. Once a bid key has a readable `gseq`, later omission keeps
+that group and an explicit group change is refused. Auction snapshots carry the
+exact profile and absolute capacity through crash resume.
+
+`already_selected` provides anti-affinity among placements evaluated against one
+auction snapshot. It does not provide balancing across separate runs.
 
 ### Crash resume
 
@@ -164,6 +205,13 @@ across processes, and on Linux it is *coincidentally* meaningful on the same
 host -- which is worse, because it makes a same-host restart test pass. Persist
 a wall-clock anchor of your own beside the blob and compute
 `now = (utcnow() - anchor).total_seconds()` on resume.
+
+`auction-snapshot/v2` is the first schema that carries absolute capacity and
+the exact group request. A persisted `auction-snapshot/v1` must be discarded
+and its auction restarted, or migrated by an adapter that can re-read both facts
+authoritatively. It must never be relabelled as v2 or filled from guessed/default
+values: doing so would let a resumed auction make a fit decision from evidence
+the original snapshot did not contain.
 
 `scope` is opaque here and the core never reads it. It exists because `bid_key`
 is unique WITHIN an order and not across the chain, so a snapshot handed back by
