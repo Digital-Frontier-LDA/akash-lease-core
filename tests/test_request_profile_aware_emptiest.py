@@ -16,6 +16,7 @@ from akash_lease_core import (
     AuctionStatus,
     BidObservation,
     BidRejectionReason,
+    NodeCapacity,
     PreferredSelection,
     ProviderCapacity,
     ResourceProfile,
@@ -68,11 +69,18 @@ def _capacity(
     storage: tuple[float, float] = (900, 1000),
     gpu: tuple[float, float] = (0, 0),
 ) -> ProviderCapacity:
+    node = NodeCapacity(
+        cpu_millicores_available=cpu[0],
+        memory_bytes_available=memory[0],
+        storage_bytes_available=storage[0],
+        gpu_count_available=gpu[0],
+    )
     return ProviderCapacity.from_totals(
         cpu=cpu,
         memory=memory,
         storage=storage,
         gpu=gpu,
+        node_capacities=(node,),
     )
 
 
@@ -145,7 +153,10 @@ def test_unreadable_required_dimension_and_insufficient_fit_are_distinct() -> No
         _adapter_observation(
             "lisbon",
             "1",
-            ProviderCapacity.from_totals(cpu=(900, 1000)),
+            ProviderCapacity.from_totals(
+                cpu=(900, 1000),
+                node_capacities=(NodeCapacity(cpu_millicores_available=900),),
+            ),
             profile,
             1,
         )
@@ -384,9 +395,18 @@ def test_late_profile_backfills_earlier_bid_for_same_group_order_independently()
     auction.observe(_adapter_observation("sofia", "2", capacity, profile, 2))
 
     profiles = [item["resource_profile"] for item in auction.snapshot()["bids"]]
+    encoded_profile = {
+        "cpu_millicores": 100,
+        "memory_bytes": 0,
+        "storage_bytes": 0,
+        "gpu_count": 0,
+        "replicas": [
+            {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0}
+        ],
+    }
     assert profiles == [
-        {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0},
-        {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0},
+        encoded_profile,
+        encoded_profile,
     ]
 
 

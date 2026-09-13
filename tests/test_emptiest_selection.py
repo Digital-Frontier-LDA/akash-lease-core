@@ -18,12 +18,28 @@ from akash_lease_core.auction import (
     BidObservation,
     PreferredSelection,
 )
-from akash_lease_core.capacity import ProviderCapacity, ResourceProfile
+from akash_lease_core.capacity import NodeCapacity, ProviderCapacity, ResourceProfile
 
 PREFERRED = frozenset({"lisbon", "sofia", "hel"})
 
 
 DEFAULT_PROFILE = ResourceProfile(cpu_millicores=1)
+
+
+def _capacity(**dims: tuple[float, float]) -> ProviderCapacity:
+    available = {
+        {
+            "cpu": "cpu_millicores_available",
+            "memory": "memory_bytes_available",
+            "storage": "storage_bytes_available",
+            "gpu": "gpu_count_available",
+        }[name]: pair[0]
+        for name, pair in dims.items()
+    }
+    return ProviderCapacity.from_totals(
+        node_capacities=(NodeCapacity(**available),),
+        **dims,
+    )
 
 
 def _auction(mode: PreferredSelection, fleet, *, profile=DEFAULT_PROFILE):
@@ -51,9 +67,9 @@ def _auction(mode: PreferredSelection, fleet, *, profile=DEFAULT_PROFILE):
 
 # The measured shape: the big empty one is also the dearest.
 FLEET = [
-    ("lisbon", "9", ProviderCapacity.from_totals(cpu=(92, 100), memory=(90, 100))),
-    ("sofia", "1", ProviderCapacity.from_totals(cpu=(50, 100), memory=(50, 100))),
-    ("hel", "5", ProviderCapacity.from_totals(cpu=(40, 100), memory=(45, 100))),
+    ("lisbon", "9", _capacity(cpu=(92, 100), memory=(90, 100))),
+    ("sofia", "1", _capacity(cpu=(50, 100), memory=(50, 100))),
+    ("hel", "5", _capacity(cpu=(40, 100), memory=(45, 100))),
 ]
 
 
@@ -74,8 +90,8 @@ def test_the_binding_dimension_decides_not_the_roomiest_one() -> None:
     memory-bound workload. Ranking on the maximum -- or an average -- would
     recommend exactly the provider about to refuse the bid."""
     fleet = [
-        ("lisbon", "9", ProviderCapacity.from_totals(cpu=(92, 100), memory=(5, 100))),
-        ("sofia", "1", ProviderCapacity.from_totals(cpu=(50, 100), memory=(50, 100))),
+        ("lisbon", "9", _capacity(cpu=(92, 100), memory=(5, 100))),
+        ("sofia", "1", _capacity(cpu=(50, 100), memory=(50, 100))),
     ]
     result = _auction(
         PreferredSelection.EMPTIEST,
@@ -125,7 +141,7 @@ def test_KNOWN_NEGATIVE_without_anti_affinity_all_three_pile_onto_one() -> None:
 def test_anti_affinity_deprioritises_it_does_not_exclude() -> None:
     """⚠ If the already-taken provider is the ONLY preferred bidder, taking it
     beats failing to place. This changes the ORDER, never the eligibility."""
-    fleet = [("lisbon", "9", ProviderCapacity.from_totals(cpu=(92, 100)))]
+    fleet = [("lisbon", "9", _capacity(cpu=(92, 100)))]
     result = _auction(PreferredSelection.EMPTIEST, fleet).evaluate(
         now=11.0, already_selected=frozenset({"lisbon"})
     )

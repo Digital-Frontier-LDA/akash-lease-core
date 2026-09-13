@@ -100,7 +100,14 @@ from .auction import (
     SelectionReason,
     UnsupportedSnapshotVersion,
 )
-from .capacity import CapacityFit, ProviderCapacity, ResourceProfile, from_provider_status
+from .capacity import (
+    CapacityFit,
+    NodeCapacity,
+    ProviderCapacity,
+    ReplicaProfile,
+    ResourceProfile,
+    from_provider_status,
+)
 from .chain_identity import DeploymentKey, is_canonical_akash_dseq, is_canonical_akash_owner
 from .close_policy import (
     CLOSE_POLICY_VERSION,
@@ -382,7 +389,9 @@ __all__ = [
     "qualified_set",
     "PreferredSelection",
     "CapacityFit",
+    "NodeCapacity",
     "ProviderCapacity",
+    "ReplicaProfile",
     "ResourceProfile",
     "from_provider_status",
     "STDOUT",

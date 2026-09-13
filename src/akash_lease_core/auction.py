@@ -38,7 +38,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from .capacity import CapacityFit, ProviderCapacity, ResourceProfile
+from .capacity import CapacityFit, NodeCapacity, ProviderCapacity, ReplicaProfile, ResourceProfile
 
 
 class PreferredSelection(str, Enum):
@@ -215,7 +215,7 @@ class AuctionResult:
 # auction decided" versus "how was this auction written down" -- and one string
 # doing both means a serialisation change cannot be shipped without claiming the
 # policy also changed.
-AUCTION_SNAPSHOT_VERSION = "auction-snapshot/v2"
+AUCTION_SNAPSHOT_VERSION = "auction-snapshot/v3"
 
 #: Exactly the top-level keys of a snapshot at ``AUCTION_SNAPSHOT_VERSION``.
 _SNAPSHOT_KEYS = frozenset({"version", "scope", "started_at", "policy", "bids"})
@@ -365,6 +365,36 @@ def _decode_resource_profile(value: object, where: str) -> ResourceProfile | Non
     return ResourceProfile(**_decode_dataclass(ResourceProfile, value, where))
 
 
+def _encode_node_capacities(value: tuple[NodeCapacity, ...] | None) -> object:
+    if value is None:
+        return None
+    return [_encode_dataclass(node) for node in value]
+
+
+def _decode_node_capacities(value: object, where: str) -> tuple[NodeCapacity, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"{where}: expected a list or null, got {type(value).__name__}")
+    return tuple(
+        NodeCapacity(**_decode_dataclass(NodeCapacity, item, f"{where}[{index}]"))
+        for index, item in enumerate(value)
+    )
+
+
+def _encode_replica_profiles(value: tuple[ReplicaProfile, ...]) -> object:
+    return [_encode_dataclass(replica) for replica in value]
+
+
+def _decode_replica_profiles(value: object, where: str) -> tuple[ReplicaProfile, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{where}: expected a list, got {type(value).__name__}")
+    return tuple(
+        ReplicaProfile(**_decode_dataclass(ReplicaProfile, item, f"{where}[{index}]"))
+        for index, item in enumerate(value)
+    )
+
+
 def _decode_preferred_selection(value: object, where: str) -> PreferredSelection:
     text = _decode_str(value, where)
     try:
@@ -396,6 +426,8 @@ _CODECS: dict[str, tuple[_Encode, _Decode]] = {
     "frozenset[str] | None": (_encode_sorted_or_none, _decode_str_frozenset_or_none),
     "ProviderCapacity | None": (_encode_capacity, _decode_capacity),
     "ResourceProfile | None": (_encode_resource_profile, _decode_resource_profile),
+    "tuple[NodeCapacity, ...] | None": (_encode_node_capacities, _decode_node_capacities),
+    "tuple[ReplicaProfile, ...]": (_encode_replica_profiles, _decode_replica_profiles),
     "PreferredSelection": (_encode_enum, _decode_preferred_selection),
 }
 

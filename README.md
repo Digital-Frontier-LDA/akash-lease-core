@@ -112,8 +112,10 @@ from akash_lease_core import (
     Auction,
     AuctionPolicy,
     BidObservation,
+    NodeCapacity,
     PreferredSelection,
     ProviderCapacity,
+    ReplicaProfile,
     ResourceProfile,
 )
 
@@ -136,11 +138,25 @@ auction.observe(
         capacity=ProviderCapacity.from_totals(
             cpu=(8_000, 10_000),
             memory=(24 * 2**30, 32 * 2**30),
+            node_capacities=(
+                NodeCapacity(
+                    cpu_millicores_available=5_000,
+                    memory_bytes_available=16 * 2**30,
+                ),
+                NodeCapacity(
+                    cpu_millicores_available=3_000,
+                    memory_bytes_available=8 * 2**30,
+                ),
+            ),
         ),
         resource_profile=ResourceProfile(
             cpu_millicores=2_000,
             memory_bytes=4 * 2**30,
+            replicas=(
+                ReplicaProfile(cpu_millicores=2_000, memory_bytes=4 * 2**30),
+            ),
         ),
+        gseq=1,
     )
 )
 
@@ -157,10 +173,11 @@ phase transition. Provider
 eligibility is policy input—not hard-coded in this package. Mixed denominations
 fail closed because unlike currencies cannot be compared safely.
 
-`EMPTIEST` first proves that the provider's absolute free units can fit the
-request, then ranks by the binding free fraction across only the dimensions the
-group requests. A zero GPU request therefore cannot make a CPU-only workload
-follow GPU pressure. Missing absolute capacity for a requested dimension and
+`EMPTIEST` first proves that the provider's aggregate free units can fit the
+whole group and that one node can fit every individual replica, then ranks by
+the binding free fraction across only the dimensions the group requests. A zero
+GPU request therefore cannot make a CPU-only workload follow GPU pressure.
+Missing aggregate or per-node capacity for a requested dimension and
 measured-but-insufficient capacity are distinct `BidRejectionReason` values.
 Missing `resource_profile` never invokes the old all-dimension score: it falls
 back to cheapest with the explicit
@@ -168,9 +185,10 @@ back to cheapest with the explicit
 
 The profile belongs to each `BidObservation`, since bids from one order may
 target groups with different shapes. The adapter must derive it from the final
-submitted SDL group: multiply every service resource by that service's `count`,
-then sum all services in the group. Raw per-replica values are not an aggregate
-profile. Capacity snapshots retain both free fractions and absolute free units.
+submitted SDL group: retain each replica shape (repeating it for the service's
+`count`) and sum all replicas into the aggregate fields. The constructor refuses
+a replica list whose sum differs from that aggregate. Capacity snapshots retain
+free fractions, aggregate absolute free units, and the per-node breakdown.
 A non-empty profile without a readable `gseq` is rejected because the core
 cannot prove which group it describes. Once observed, a group's profile is
 immutable; later missing observations inherit it and a conflicting non-empty
@@ -206,10 +224,10 @@ host -- which is worse, because it makes a same-host restart test pass. Persist
 a wall-clock anchor of your own beside the blob and compute
 `now = (utcnow() - anchor).total_seconds()` on resume.
 
-`auction-snapshot/v2` is the first schema that carries absolute capacity and
-the exact group request. A persisted `auction-snapshot/v1` must be discarded
-and its auction restarted, or migrated by an adapter that can re-read both facts
-authoritatively. It must never be relabelled as v2 or filled from guessed/default
+`auction-snapshot/v3` is the first schema that carries per-node capacity and
+each replica request. A persisted v1 or v2 snapshot must be discarded and its
+auction restarted, or migrated by an adapter that can re-read both facts
+authoritatively. It must never be relabelled as v3 or filled from guessed/default
 values: doing so would let a resumed auction make a fit decision from evidence
 the original snapshot did not contain.
 

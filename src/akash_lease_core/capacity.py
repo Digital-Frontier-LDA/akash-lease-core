@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
-__all__ = ["CapacityFit", "ProviderCapacity", "ResourceProfile"]
+__all__ = ["CapacityFit", "NodeCapacity", "ProviderCapacity", "ReplicaProfile", "ResourceProfile"]
 
 _DIMENSIONS = ("cpu", "memory", "storage", "gpu")
 _AVAILABLE_FIELDS = {
@@ -44,14 +44,8 @@ class CapacityFit(str, Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class ResourceProfile:
-    """Aggregate resources requested by the exact Akash group behind a bid.
-
-    Values use explicit Akash/provider-status units. Consumers must multiply
-    each service by its ``count`` and sum the final submitted group. Passing a
-    per-replica shape here would make a provider appear to fit a population it
-    cannot actually host.
-    """
+class ReplicaProfile:
+    """Resources one replica of one service must fit on the same node."""
 
     cpu_millicores: int = 0
     memory_bytes: int = 0
@@ -64,13 +58,100 @@ class ResourceProfile:
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer")
         if not self.requested_dimensions:
-            raise ValueError("resource profile must request at least one resource dimension")
+            raise ValueError("replica profile must request at least one resource dimension")
 
     @property
     def requested_dimensions(self) -> tuple[str, ...]:
         return tuple(
             dimension for dimension in _DIMENSIONS if getattr(self, _REQUEST_FIELDS[dimension]) > 0
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceProfile:
+    """Aggregate resources requested by the exact Akash group behind a bid.
+
+    Values use explicit Akash/provider-status units. Consumers must multiply
+    each service by its ``count`` and sum the final submitted group. Passing a
+    per-replica shape in the aggregate fields would make a provider appear to
+    fit a population it cannot actually host. ``replicas`` carries each
+    replica shape, including repeated shapes for service ``count``, so node fit
+    and aggregate fit can both be proved. Omitting it means the group contains
+    one replica with the aggregate shape.
+    """
+
+    cpu_millicores: int = 0
+    memory_bytes: int = 0
+    storage_bytes: int = 0
+    gpu_count: int = 0
+    replicas: tuple[ReplicaProfile, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in _REQUEST_FIELDS.values():
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if not self.requested_dimensions:
+            raise ValueError("resource profile must request at least one resource dimension")
+        if not isinstance(self.replicas, tuple) or any(
+            not isinstance(replica, ReplicaProfile) for replica in self.replicas
+        ):
+            raise ValueError("replicas must be a tuple of ReplicaProfile values")
+        if not self.replicas:
+            object.__setattr__(
+                self,
+                "replicas",
+                (
+                    ReplicaProfile(
+                        **{name: getattr(self, name) for name in _REQUEST_FIELDS.values()}
+                    ),
+                ),
+            )
+        for name in _REQUEST_FIELDS.values():
+            replica_total = sum(getattr(replica, name) for replica in self.replicas)
+            if replica_total != getattr(self, name):
+                raise ValueError(
+                    f"replicas sum to {replica_total} {name}, "
+                    f"but the aggregate requests {getattr(self, name)}"
+                )
+
+    @property
+    def requested_dimensions(self) -> tuple[str, ...]:
+        return tuple(
+            dimension for dimension in _DIMENSIONS if getattr(self, _REQUEST_FIELDS[dimension]) > 0
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class NodeCapacity:
+    """Absolute free resources on one schedulable provider node."""
+
+    cpu_millicores_available: float | None = None
+    memory_bytes_available: float | None = None
+    storage_bytes_available: float | None = None
+    gpu_count_available: float | None = None
+
+    def __post_init__(self) -> None:
+        for name in _AVAILABLE_FIELDS.values():
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{name} must be a non-negative real number or None")
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+            object.__setattr__(self, name, float(value))
+
+    def fit(self, profile: ReplicaProfile) -> CapacityFit:
+        """Return whether this one node can hold this one replica."""
+
+        for dimension in profile.requested_dimensions:
+            available = getattr(self, _AVAILABLE_FIELDS[dimension])
+            if available is None:
+                return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+            if available < getattr(profile, _REQUEST_FIELDS[dimension]):
+                return CapacityFit.INSUFFICIENT_CAPACITY
+        return CapacityFit.FIT
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +173,7 @@ class ProviderCapacity:
     memory_bytes_available: float | None = None
     storage_bytes_available: float | None = None
     gpu_count_available: float | None = None
+    node_capacities: tuple[NodeCapacity, ...] | None = None
 
     def __post_init__(self) -> None:
         for name in _DIMENSIONS:
@@ -117,9 +199,20 @@ class ProviderCapacity:
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
             object.__setattr__(self, name, float(value))
+        if self.node_capacities is not None and (
+            not isinstance(self.node_capacities, tuple)
+            or not self.node_capacities
+            or any(not isinstance(node, NodeCapacity) for node in self.node_capacities)
+        ):
+            raise ValueError("node_capacities must be a non-empty tuple of NodeCapacity or None")
 
     @classmethod
-    def from_totals(cls, **dims: tuple[float, float] | None) -> ProviderCapacity:
+    def from_totals(
+        cls,
+        *,
+        node_capacities: tuple[NodeCapacity, ...] | None = None,
+        **dims: tuple[float, float] | None,
+    ) -> ProviderCapacity:
         """Build from ``dimension=(available, total)`` pairs.
 
         ⚠ ``total == 0`` yields ``None``, NOT ``0.0``. A provider that offers no
@@ -156,7 +249,7 @@ class ProviderCapacity:
                 continue
             out[name] = min(1.0, available / total)
             out[_AVAILABLE_FIELDS[name]] = float(available)
-        return cls(**out)
+        return cls(**out, node_capacities=node_capacities)
 
     def available_fraction(self) -> float | None:
         """The BINDING dimension's available fraction, or ``None`` if unreadable.
@@ -172,7 +265,7 @@ class ProviderCapacity:
         return min(readable) if readable else None
 
     def fit(self, profile: ResourceProfile) -> CapacityFit:
-        """Return whether this provider can fit the exact aggregate request."""
+        """Prove both full-group aggregate fit and same-node replica fit."""
 
         for dimension in profile.requested_dimensions:
             fraction = getattr(self, dimension)
@@ -181,6 +274,16 @@ class ProviderCapacity:
                 return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
             if available < getattr(profile, _REQUEST_FIELDS[dimension]):
                 return CapacityFit.INSUFFICIENT_CAPACITY
+
+        if self.node_capacities is None:
+            return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+        for replica in profile.replicas:
+            node_fits = tuple(node.fit(replica) for node in self.node_capacities)
+            if CapacityFit.FIT in node_fits:
+                continue
+            if CapacityFit.REQUIRED_DIMENSION_UNREADABLE in node_fits:
+                return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+            return CapacityFit.INSUFFICIENT_CAPACITY
         return CapacityFit.FIT
 
     def available_fraction_for(self, profile: ResourceProfile) -> float | None:
@@ -222,22 +325,28 @@ def _usable(value: object) -> bool:
     return math.isfinite(value) and value >= 0
 
 
-def _sum_nodes(nodes: object) -> dict[str, tuple[float, float] | None] | None:
-    """Sum (available, total) per dimension across a provider's nodes."""
+def _summarize_nodes(
+    nodes: object,
+) -> tuple[dict[str, tuple[float, float] | None], tuple[NodeCapacity, ...]] | None:
+    """Retain each node's free units while summing provider-wide totals."""
     if not isinstance(nodes, (list, tuple)) or not nodes:
         return None
     totals: dict[str, float] = {ours: 0.0 for ours, _ in _STATUS_DIMENSIONS}
     frees: dict[str, float] = {ours: 0.0 for ours, _ in _STATUS_DIMENSIONS}
     overreported: set[str] = set()
+    node_capacities: list[NodeCapacity] = []
     seen = False
     for node in nodes:
         if not isinstance(node, Mapping):
+            node_capacities.append(NodeCapacity())
             continue
         allocatable = node.get("allocatable")
         available = node.get("available")
         if not isinstance(allocatable, Mapping) or not isinstance(available, Mapping):
+            node_capacities.append(NodeCapacity())
             continue
         seen = True
+        node_free: dict[str, float] = {}
         for ours, theirs in _STATUS_DIMENSIONS:
             total = allocatable.get(theirs)
             free = available.get(theirs)
@@ -264,6 +373,8 @@ def _sum_nodes(nodes: object) -> dict[str, tuple[float, float] | None] | None:
                 continue
             totals[ours] += float(total)
             frees[ours] += float(free)
+            node_free[_AVAILABLE_FIELDS[ours]] = float(free)
+        node_capacities.append(NodeCapacity(**node_free))
     if not seen:
         return None
     # ⛔ AN AGGREGATE THAT OVERFLOWED IS NOT A MEASUREMENT EITHER. Two per-node
@@ -274,10 +385,13 @@ def _sum_nodes(nodes: object) -> dict[str, tuple[float, float] | None] | None:
     for ours, _ in _STATUS_DIMENSIONS:
         if not math.isfinite(totals[ours]) or not math.isfinite(frees[ours]):
             return None
-    return {
-        ours: None if ours in overreported else (frees[ours], totals[ours])
-        for ours, _ in _STATUS_DIMENSIONS
-    }
+    return (
+        {
+            ours: None if ours in overreported else (frees[ours], totals[ours])
+            for ours, _ in _STATUS_DIMENSIONS
+        },
+        tuple(node_capacities),
+    )
 
 
 def from_provider_status(status: object) -> ProviderCapacity:
@@ -322,7 +436,8 @@ def from_provider_status(status: object) -> ProviderCapacity:
     available = inventory.get("available")
     if not isinstance(available, Mapping):
         return ProviderCapacity()
-    pairs = _sum_nodes(available.get("nodes"))
-    if pairs is None:
+    summary = _summarize_nodes(available.get("nodes"))
+    if summary is None:
         return ProviderCapacity()
-    return ProviderCapacity.from_totals(**pairs)
+    pairs, node_capacities = summary
+    return ProviderCapacity.from_totals(node_capacities=node_capacities, **pairs)
