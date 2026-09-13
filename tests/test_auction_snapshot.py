@@ -43,15 +43,22 @@ from akash_lease_core.auction import (
     UnsupportedSnapshotVersion,
     _codec_for,
 )
-from akash_lease_core.capacity import ProviderCapacity, ResourceProfile
+from akash_lease_core.capacity import (
+    NodeCapacity,
+    ProviderCapacity,
+    ReplicaProfile,
+    ResourceProfile,
+)
 
 # The dataclass shapes this schema version was written against. See the module
 # docstring: these are asserted, not documented, because a count in prose is a
 # claim nobody re-checks.
 BID_OBSERVATION_FIELDS = 10
 AUCTION_POLICY_FIELDS = 8
-PROVIDER_CAPACITY_FIELDS = 8
-RESOURCE_PROFILE_FIELDS = 4
+NODE_CAPACITY_FIELDS = 4
+PROVIDER_CAPACITY_FIELDS = 9
+REPLICA_PROFILE_FIELDS = 4
+RESOURCE_PROFILE_FIELDS = 5
 
 
 def _modules_imported_by(source: str) -> set[str]:
@@ -130,6 +137,14 @@ def _populated() -> Auction:
                 memory=(500, 1000),
                 storage=(0, 0),
                 gpu=(1, 4),
+                node_capacities=(
+                    NodeCapacity(
+                        cpu_millicores_available=900,
+                        memory_bytes_available=500,
+                        storage_bytes_available=0,
+                        gpu_count_available=1,
+                    ),
+                ),
             ),
             resource_profile=ResourceProfile(cpu_millicores=500, memory_bytes=1024),
             gseq=7,
@@ -248,6 +263,16 @@ class TestFieldCompleteness:
 
         assert set(encoded["resource_profile"]) == {spec.name for spec in fields(ResourceProfile)}
 
+    def test_every_node_and_replica_field_is_written_to_the_snapshot(self):
+        encoded = _populated().snapshot()["bids"][0]
+
+        assert set(encoded["capacity"]["node_capacities"][0]) == {
+            spec.name for spec in fields(NodeCapacity)
+        }
+        assert set(encoded["resource_profile"]["replicas"][0]) == {
+            spec.name for spec in fields(ReplicaProfile)
+        }
+
     def test_the_field_counts_this_schema_version_was_written_against(self):
         """Deliberately a COUNT, and deliberately brittle.
 
@@ -258,9 +283,11 @@ class TestFieldCompleteness:
         and whether the new field's TYPE has a codec.
         """
         assert len(fields(BidObservation)) == BID_OBSERVATION_FIELDS
-        assert len(fields(AuctionPolicy)) == AUCTION_POLICY_FIELDS
+        assert len(fields(NodeCapacity)) == NODE_CAPACITY_FIELDS
         assert len(fields(ProviderCapacity)) == PROVIDER_CAPACITY_FIELDS
+        assert len(fields(ReplicaProfile)) == REPLICA_PROFILE_FIELDS
         assert len(fields(ResourceProfile)) == RESOURCE_PROFILE_FIELDS
+        assert len(fields(AuctionPolicy)) == AUCTION_POLICY_FIELDS
 
     def test_proofs_survives_the_round_trip(self):
         """PR #22's incident by name: ``proofs`` is the field the hand-written
@@ -383,6 +410,14 @@ class TestNoneNeverBecomesAValue:
             memory_bytes_available=500,
             storage_bytes_available=None,
             gpu_count_available=1,
+            node_capacities=(
+                NodeCapacity(
+                    cpu_millicores_available=900,
+                    memory_bytes_available=500,
+                    storage_bytes_available=0,
+                    gpu_count_available=1,
+                ),
+            ),
         )
         assert capacity.storage is None
         assert capacity.storage != 0.0
@@ -503,6 +538,7 @@ class TestRefusals:
         conflicting["bid_key"] = "akash1other/7/1/0"
         conflicting["provider"] = "akash1other"
         conflicting["resource_profile"]["cpu_millicores"] = 501
+        conflicting["resource_profile"]["replicas"][0]["cpu_millicores"] = 501
         snap["bids"].append(conflicting)
 
         with pytest.raises(ValueError, match="gseq 7 changed resource profile"):
@@ -759,7 +795,13 @@ class TestResumeDecidesIdentically:
                 "akash1lisbon",
                 "9.0",
                 1.0,
-                capacity=ProviderCapacity.from_totals(cpu=(80, 100), gpu=(7, 10)),
+                capacity=ProviderCapacity.from_totals(
+                    cpu=(80, 100),
+                    gpu=(7, 10),
+                    node_capacities=(
+                        NodeCapacity(cpu_millicores_available=80, gpu_count_available=7),
+                    ),
+                ),
                 resource_profile=ResourceProfile(cpu_millicores=1),
                 gseq=1,
             )
@@ -769,7 +811,13 @@ class TestResumeDecidesIdentically:
                 "akash1sofia",
                 "1.0",
                 2.0,
-                capacity=ProviderCapacity.from_totals(cpu=(20, 100), gpu=(1, 10)),
+                capacity=ProviderCapacity.from_totals(
+                    cpu=(20, 100),
+                    gpu=(1, 10),
+                    node_capacities=(
+                        NodeCapacity(cpu_millicores_available=20, gpu_count_available=1),
+                    ),
+                ),
                 resource_profile=ResourceProfile(cpu_millicores=1),
                 gseq=1,
             )

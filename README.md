@@ -53,7 +53,7 @@ logic.
 The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.14.0
+akash-lease-core main   0.15.0
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -65,7 +65,7 @@ docstring discussing older behaviour. #33 read those as live pins and reported a
 range inside one consumer; the resolved skew is a single version. A naive grep counts prose as
 configuration, and here it inflated the finding by two versions.
 
-⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.14.0` contains behaviour
+⛔ **This is a record, not an adoption instruction.** Whether `0.9.0 → 0.15.0` contains behaviour
 changes that matter has not been determined. Upgrading consumers onto a version nobody has
 diffed is how a shared library becomes an incident — establish the intended pin contract
 (#32) first.
@@ -112,8 +112,10 @@ from akash_lease_core import (
     Auction,
     AuctionPolicy,
     BidObservation,
+    NodeCapacity,
     PreferredSelection,
     ProviderCapacity,
+    ReplicaProfile,
     ResourceProfile,
 )
 
@@ -136,11 +138,25 @@ auction.observe(
         capacity=ProviderCapacity.from_totals(
             cpu=(8_000, 10_000),
             memory=(24 * 2**30, 32 * 2**30),
+            node_capacities=(
+                NodeCapacity(
+                    cpu_millicores_available=5_000,
+                    memory_bytes_available=16 * 2**30,
+                ),
+                NodeCapacity(
+                    cpu_millicores_available=3_000,
+                    memory_bytes_available=8 * 2**30,
+                ),
+            ),
         ),
         resource_profile=ResourceProfile(
             cpu_millicores=2_000,
             memory_bytes=4 * 2**30,
+            replicas=(
+                ReplicaProfile(cpu_millicores=2_000, memory_bytes=4 * 2**30),
+            ),
         ),
+        gseq=1,
     )
 )
 
@@ -157,20 +173,43 @@ phase transition. Provider
 eligibility is policy input—not hard-coded in this package. Mixed denominations
 fail closed because unlike currencies cannot be compared safely.
 
-`EMPTIEST` first proves that the provider's absolute free units can fit the
-request, then ranks by the binding free fraction across only the dimensions the
-group requests. A zero GPU request therefore cannot make a CPU-only workload
-follow GPU pressure. Missing absolute capacity for a requested dimension and
-measured-but-insufficient capacity are distinct `BidRejectionReason` values.
+`EMPTIEST` first proves that the provider's aggregate free units can fit the
+whole group and that every replica can be assigned to a node while consuming
+that node's CPU, memory, storage, and GPU headroom. It then ranks by the binding
+free fraction across only the dimensions the group requests. A zero GPU request
+therefore cannot make a CPU-only workload follow GPU pressure. Missing aggregate
+or possibly-relevant per-node capacity for a requested dimension remains
+unreadable unless the readable nodes already prove the full placement; measured
+but insufficient capacity is a distinct `BidRejectionReason` value.
+Known nodes may therefore prove `FIT` while an unreadable sibling remains. That
+partial inventory can never prove the provider-wide free fraction used to rank
+`EMPTIEST`: the auction falls back to deterministic cheapest selection with the
+typed reason `emptiest_capacity_incomplete_fell_back_to_cheapest`. Silently
+omitting an unreadable node from the fraction could otherwise manufacture an
+emptiest winner.
+The placement proof is exact but NP-complete in the general case. It explores at
+most `PLACEMENT_SEARCH_STATE_LIMIT` canonical states (currently 100,000) during
+one synchronous `Auction.evaluate()` call. Reaching that bound returns the typed
+`placement_search_unsupported` rejection; it never guesses `fit` or
+`insufficient_capacity`. The iterative solver has no replica-count recursion
+limit, so low-branching groups with thousands of replicas remain supported.
+
+Akash CPU, memory, storage, and GPU units supplied as integers retain arbitrary
+precision through aggregate and per-node fit. `Decimal` values are also exact.
+Finite floats below `2**53` are compared as their exact binary values; larger
+floats cannot distinguish adjacent integral units and therefore return
+`placement_search_unsupported`. Available fractions remain floating-point ranking
+scores and do not participate in either fit proof.
 Missing `resource_profile` never invokes the old all-dimension score: it falls
 back to cheapest with the explicit
 `emptiest_request_profile_unavailable_fell_back_to_cheapest` reason.
 
 The profile belongs to each `BidObservation`, since bids from one order may
 target groups with different shapes. The adapter must derive it from the final
-submitted SDL group: multiply every service resource by that service's `count`,
-then sum all services in the group. Raw per-replica values are not an aggregate
-profile. Capacity snapshots retain both free fractions and absolute free units.
+submitted SDL group: retain each replica shape (repeating it for the service's
+`count`) and sum all replicas into the aggregate fields. The constructor refuses
+a replica list whose sum differs from that aggregate. Capacity snapshots retain
+free fractions, aggregate absolute free units, and the per-node breakdown.
 A non-empty profile without a readable `gseq` is rejected because the core
 cannot prove which group it describes. Once observed, a group's profile is
 immutable; later missing observations inherit it and a conflicting non-empty
@@ -206,10 +245,10 @@ host -- which is worse, because it makes a same-host restart test pass. Persist
 a wall-clock anchor of your own beside the blob and compute
 `now = (utcnow() - anchor).total_seconds()` on resume.
 
-`auction-snapshot/v2` is the first schema that carries absolute capacity and
-the exact group request. A persisted `auction-snapshot/v1` must be discarded
-and its auction restarted, or migrated by an adapter that can re-read both facts
-authoritatively. It must never be relabelled as v2 or filled from guessed/default
+`auction-snapshot/v3` is the first schema that carries per-node capacity and
+each replica request. A persisted v1 or v2 snapshot must be discarded and its
+auction restarted, or migrated by an adapter that can re-read both facts
+authoritatively. It must never be relabelled as v3 or filled from guessed/default
 values: doing so would let a resumed auction make a fit decision from evidence
 the original snapshot did not contain.
 

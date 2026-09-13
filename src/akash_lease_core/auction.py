@@ -38,7 +38,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
-from .capacity import CapacityFit, ProviderCapacity, ResourceProfile
+from .capacity import CapacityFit, NodeCapacity, ProviderCapacity, ReplicaProfile, ResourceProfile
 
 
 class PreferredSelection(str, Enum):
@@ -74,6 +74,7 @@ class BidRejectionReason(str, Enum):
     BID_OBSERVED_AFTER_FALLBACK_DEADLINE = "bid_observed_after_fallback_deadline"
     REQUIRED_CAPACITY_UNREADABLE = CapacityFit.REQUIRED_DIMENSION_UNREADABLE.value
     INSUFFICIENT_CAPACITY = CapacityFit.INSUFFICIENT_CAPACITY.value
+    PLACEMENT_SEARCH_UNSUPPORTED = CapacityFit.PLACEMENT_SEARCH_UNSUPPORTED.value
     RESOURCE_PROFILE_GROUP_UNBOUND = "resource_profile_group_unbound"
 
 
@@ -86,6 +87,9 @@ class SelectionReason(str, Enum):
     EMPTIEST_PREFERRED = "emptiest_preferred"
     EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST = (
         "emptiest_request_profile_unavailable_fell_back_to_cheapest"
+    )
+    EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST = (
+        "emptiest_capacity_incomplete_fell_back_to_cheapest"
     )
     CHEAPEST_PREFERRED = "cheapest_preferred"
     FIRST_ELIGIBLE_FALLBACK = "first_eligible_fallback"
@@ -215,7 +219,7 @@ class AuctionResult:
 # auction decided" versus "how was this auction written down" -- and one string
 # doing both means a serialisation change cannot be shipped without claiming the
 # policy also changed.
-AUCTION_SNAPSHOT_VERSION = "auction-snapshot/v2"
+AUCTION_SNAPSHOT_VERSION = "auction-snapshot/v3"
 
 #: Exactly the top-level keys of a snapshot at ``AUCTION_SNAPSHOT_VERSION``.
 _SNAPSHOT_KEYS = frozenset({"version", "scope", "started_at", "policy", "bids"})
@@ -248,6 +252,10 @@ def _encode_decimal(value: Decimal) -> str:
     # ⛔ str(), never float(). ``float(Decimal("0.1"))`` is a DIFFERENT number,
     # and this one decides which provider gets paid.
     return str(value)
+
+
+def _encode_quantity_or_none(value: int | float | Decimal | None) -> object:
+    return str(value) if isinstance(value, Decimal) else value
 
 
 def _encode_list(value: tuple[str, ...]) -> list[str]:
@@ -328,6 +336,21 @@ def _decode_decimal(value: object, where: str) -> Decimal:
         raise ValueError(f"{where}: {value!r} is not a decimal number") from exc
 
 
+def _decode_quantity_or_none(value: object, where: str) -> int | float | Decimal | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError(f"{where}: expected a finite number, decimal string, or null")
+    if isinstance(value, str):
+        try:
+            value = Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError(f"{where}: {value!r} is not a decimal number") from exc
+    if not math.isfinite(value):
+        raise ValueError(f"{where}: expected a finite number, got {value!r}")
+    return value
+
+
 def _decode_str_list(value: object, where: str) -> list[str]:
     if not isinstance(value, list):
         raise ValueError(f"{where}: expected a list, got {type(value).__name__}")
@@ -365,6 +388,36 @@ def _decode_resource_profile(value: object, where: str) -> ResourceProfile | Non
     return ResourceProfile(**_decode_dataclass(ResourceProfile, value, where))
 
 
+def _encode_node_capacities(value: tuple[NodeCapacity, ...] | None) -> object:
+    if value is None:
+        return None
+    return [_encode_dataclass(node) for node in value]
+
+
+def _decode_node_capacities(value: object, where: str) -> tuple[NodeCapacity, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(f"{where}: expected a list or null, got {type(value).__name__}")
+    return tuple(
+        NodeCapacity(**_decode_dataclass(NodeCapacity, item, f"{where}[{index}]"))
+        for index, item in enumerate(value)
+    )
+
+
+def _encode_replica_profiles(value: tuple[ReplicaProfile, ...]) -> object:
+    return [_encode_dataclass(replica) for replica in value]
+
+
+def _decode_replica_profiles(value: object, where: str) -> tuple[ReplicaProfile, ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{where}: expected a list, got {type(value).__name__}")
+    return tuple(
+        ReplicaProfile(**_decode_dataclass(ReplicaProfile, item, f"{where}[{index}]"))
+        for index, item in enumerate(value)
+    )
+
+
 def _decode_preferred_selection(value: object, where: str) -> PreferredSelection:
     text = _decode_str(value, where)
     try:
@@ -388,6 +441,7 @@ _CODECS: dict[str, tuple[_Encode, _Decode]] = {
     "str": (_encode_identity, _decode_str),
     "float": (_encode_float, _decode_float),
     "float | None": (_encode_float_or_none, _decode_float_or_none),
+    "_Quantity | None": (_encode_quantity_or_none, _decode_quantity_or_none),
     "int": (_encode_identity, _decode_int),
     "int | None": (_encode_identity, _decode_int_or_none),
     "Decimal": (_encode_decimal, _decode_decimal),
@@ -396,6 +450,8 @@ _CODECS: dict[str, tuple[_Encode, _Decode]] = {
     "frozenset[str] | None": (_encode_sorted_or_none, _decode_str_frozenset_or_none),
     "ProviderCapacity | None": (_encode_capacity, _decode_capacity),
     "ResourceProfile | None": (_encode_resource_profile, _decode_resource_profile),
+    "tuple[NodeCapacity, ...] | None": (_encode_node_capacities, _decode_node_capacities),
+    "tuple[ReplicaProfile, ...]": (_encode_replica_profiles, _decode_replica_profiles),
     "PreferredSelection": (_encode_enum, _decode_preferred_selection),
 }
 
@@ -802,6 +858,10 @@ class Auction:
                     rejected.append(
                         self._reject(observation, BidRejectionReason.INSUFFICIENT_CAPACITY)
                     )
+                elif fit is CapacityFit.PLACEMENT_SEARCH_UNSUPPORTED:
+                    rejected.append(
+                        self._reject(observation, BidRejectionReason.PLACEMENT_SEARCH_UNSUPPORTED)
+                    )
                 else:
                     candidates.append(observation)
             else:
@@ -842,7 +902,13 @@ class Auction:
         if preferred:
             emptiest = self.policy.preferred_selection is PreferredSelection.EMPTIEST
             profiles_complete = all(item.resource_profile is not None for item in pool)
-            if emptiest and profiles_complete:
+            ranking_complete = profiles_complete and all(
+                item.capacity is not None
+                and item.resource_profile is not None
+                and item.capacity.ranking_complete_for(item.resource_profile)
+                for item in pool
+            )
+            if emptiest and ranking_complete:
                 # ⭐ ANTI-AFFINITY FIRST, headroom second.
                 #
                 # A multi-region deployment evaluates several auctions against ONE
@@ -875,7 +941,11 @@ class Auction:
                 # make an unmeasurable fleet indistinguishable from a fleet that
                 # was measured and happened to agree.
                 reason = (
-                    SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
+                    (
+                        SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
+                        if not profiles_complete
+                        else SelectionReason.EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST
+                    )
                     if emptiest
                     else SelectionReason.CHEAPEST_PREFERRED
                 )

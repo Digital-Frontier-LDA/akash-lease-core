@@ -18,7 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from akash_lease_core import CapacityFit, ProviderCapacity, ResourceProfile, from_provider_status
+from akash_lease_core import (
+    CapacityFit,
+    NodeCapacity,
+    ProviderCapacity,
+    ResourceProfile,
+    from_provider_status,
+)
 
 FIXTURE = Path(__file__).parent / "fixtures" / "provider_status_sofia.json"
 
@@ -178,7 +184,10 @@ def test_from_totals_rejects_available_above_total_instead_of_clamping() -> None
 )
 def test_from_totals_rejects_boolean_quantities_before_they_can_prove_fit(pair) -> None:
     profile = ResourceProfile(cpu_millicores=1)
-    coerced = ProviderCapacity.from_totals(cpu=(int(pair[0]), int(pair[1])))
+    coerced = ProviderCapacity.from_totals(
+        cpu=(int(pair[0]), int(pair[1])),
+        node_capacities=(NodeCapacity(cpu_millicores_available=int(pair[0])),),
+    )
     assert coerced.fit(profile) is CapacityFit.FIT
 
     with pytest.raises(ValueError, match="must be real numbers"):

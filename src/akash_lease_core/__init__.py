@@ -100,7 +100,15 @@ from .auction import (
     SelectionReason,
     UnsupportedSnapshotVersion,
 )
-from .capacity import CapacityFit, ProviderCapacity, ResourceProfile, from_provider_status
+from .capacity import (
+    PLACEMENT_SEARCH_STATE_LIMIT,
+    CapacityFit,
+    NodeCapacity,
+    ProviderCapacity,
+    ReplicaProfile,
+    ResourceProfile,
+    from_provider_status,
+)
 from .chain_identity import DeploymentKey, is_canonical_akash_dseq, is_canonical_akash_owner
 from .close_policy import (
     CLOSE_POLICY_VERSION,
@@ -381,8 +389,11 @@ __all__ = [
     "evaluate_provider",
     "qualified_set",
     "PreferredSelection",
+    "PLACEMENT_SEARCH_STATE_LIMIT",
     "CapacityFit",
+    "NodeCapacity",
     "ProviderCapacity",
+    "ReplicaProfile",
     "ResourceProfile",
     "from_provider_status",
     "STDOUT",
@@ -462,7 +473,7 @@ __all__ = [
     "select_batch",
 ]
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants

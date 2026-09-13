@@ -16,13 +16,15 @@ from akash_lease_core import (
     AuctionStatus,
     BidObservation,
     BidRejectionReason,
+    CapacityFit,
+    NodeCapacity,
     PreferredSelection,
     ProviderCapacity,
     ResourceProfile,
     SelectionReason,
 )
 
-PREFERRED = frozenset({"lisbon", "sofia", "helsinki", "small", "large"})
+PREFERRED = frozenset({"lisbon", "sofia", "helsinki", "small", "large", "partial", "complete"})
 
 
 def _adapter_observation(
@@ -68,11 +70,18 @@ def _capacity(
     storage: tuple[float, float] = (900, 1000),
     gpu: tuple[float, float] = (0, 0),
 ) -> ProviderCapacity:
+    node = NodeCapacity(
+        cpu_millicores_available=cpu[0],
+        memory_bytes_available=memory[0],
+        storage_bytes_available=storage[0],
+        gpu_count_available=gpu[0],
+    )
     return ProviderCapacity.from_totals(
         cpu=cpu,
         memory=memory,
         storage=storage,
         gpu=gpu,
+        node_capacities=(node,),
     )
 
 
@@ -145,7 +154,10 @@ def test_unreadable_required_dimension_and_insufficient_fit_are_distinct() -> No
         _adapter_observation(
             "lisbon",
             "1",
-            ProviderCapacity.from_totals(cpu=(900, 1000)),
+            ProviderCapacity.from_totals(
+                cpu=(900, 1000),
+                node_capacities=(NodeCapacity(cpu_millicores_available=900),),
+            ),
             profile,
             1,
         )
@@ -167,6 +179,59 @@ def test_unreadable_required_dimension_and_insufficient_fit_are_distinct() -> No
         BidRejectionReason.REQUIRED_CAPACITY_UNREADABLE,
         BidRejectionReason.INSUFFICIENT_CAPACITY,
     }
+
+
+def test_partial_inventory_can_prove_fit_but_cannot_prove_emptiest() -> None:
+    profile = ResourceProfile(cpu_millicores=1)
+    partial = ProviderCapacity.from_totals(
+        cpu=(10, 10),
+        node_capacities=(
+            NodeCapacity(cpu_millicores_available=10),
+            NodeCapacity(),
+        ),
+    )
+    complete = ProviderCapacity.from_totals(
+        cpu=(90, 100),
+        node_capacities=(NodeCapacity(cpu_millicores_available=90),),
+    )
+
+    assert partial.fit(profile) is CapacityFit.FIT
+    assert partial.available_fraction_for(profile) is None
+    result = _evaluate([("partial", "9", partial), ("complete", "1", complete)], profile)
+
+    assert result.selected.provider == "complete"
+    assert (
+        result.selection_reason
+        is SelectionReason.EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST
+    )
+    assert [item.provider for item in result.considered] == ["complete", "partial"]
+
+
+def test_ranking_completeness_call_site_changes_the_auction_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = ResourceProfile(cpu_millicores=1)
+    partial = ProviderCapacity.from_totals(
+        cpu=(10, 10),
+        node_capacities=(
+            NodeCapacity(cpu_millicores_available=10),
+            NodeCapacity(),
+        ),
+    )
+    complete = ProviderCapacity.from_totals(
+        cpu=(90, 100),
+        node_capacities=(NodeCapacity(cpu_millicores_available=90),),
+    )
+    rows = [("partial", "9", partial), ("complete", "1", complete)]
+    normal = _evaluate(rows, profile)
+
+    monkeypatch.setattr(ProviderCapacity, "ranking_complete_for", lambda self, request: True)
+    mutated = _evaluate(rows, profile)
+
+    assert normal.selected.provider == "complete"
+    assert mutated.selected.provider == "partial"
+    assert normal.selection_reason is not mutated.selection_reason
+    assert mutated.selection_reason is SelectionReason.EMPTIEST_PREFERRED
 
 
 def test_missing_profile_is_an_explicit_degraded_decision() -> None:
@@ -384,9 +449,18 @@ def test_late_profile_backfills_earlier_bid_for_same_group_order_independently()
     auction.observe(_adapter_observation("sofia", "2", capacity, profile, 2))
 
     profiles = [item["resource_profile"] for item in auction.snapshot()["bids"]]
+    encoded_profile = {
+        "cpu_millicores": 100,
+        "memory_bytes": 0,
+        "storage_bytes": 0,
+        "gpu_count": 0,
+        "replicas": [
+            {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0}
+        ],
+    }
     assert profiles == [
-        {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0},
-        {"cpu_millicores": 100, "memory_bytes": 0, "storage_bytes": 0, "gpu_count": 0},
+        encoded_profile,
+        encoded_profile,
     ]
 
 

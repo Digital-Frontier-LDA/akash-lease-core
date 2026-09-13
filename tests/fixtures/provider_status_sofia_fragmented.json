@@ -1,0 +1,16 @@
+{
+  "cluster": {
+    "inventory": {
+      "available": {
+        "nodes": [
+          {"name": "node1", "allocatable": {"cpu": 72000}, "available": {"cpu": 5700}},
+          {"name": "node2", "allocatable": {"cpu": 72000}, "available": {"cpu": 5200}},
+          {"name": "node3", "allocatable": {"cpu": 72000}, "available": {"cpu": 5000}},
+          {"name": "node4", "allocatable": {"cpu": 72000}, "available": {"cpu": 4900}},
+          {"name": "node5", "allocatable": {"cpu": 72000}, "available": {"cpu": 4700}},
+          {"name": "node6", "allocatable": {"cpu": 72000}, "available": {"cpu": 4400}}
+        ]
+      }
+    }
+  }
+}
