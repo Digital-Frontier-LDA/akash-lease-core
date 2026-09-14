@@ -53,7 +53,7 @@ logic.
 The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.15.0
+akash-lease-core main   0.15.1
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -237,7 +237,7 @@ exact profile and absolute capacity through crash resume.
 auction snapshot, in the preferred-pool `EMPTIEST` branches: the ranked selection
 and both cheapest fallbacks (profile unavailable, capacity incomplete). It
 deprioritises and never excludes. `first_eligible_fallback` (no preferred bid
-arrived) ignores it, as the `CHEAPEST` policy does. It does not provide balancing
+within the collection window) ignores it, as the `CHEAPEST` policy does. It does not provide balancing
 across separate runs.
 
 ### Crash resume
