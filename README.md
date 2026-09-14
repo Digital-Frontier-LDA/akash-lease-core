@@ -53,7 +53,7 @@ logic.
 The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.15.1
+akash-lease-core main   0.15.2
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
