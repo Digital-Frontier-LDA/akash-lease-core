@@ -234,9 +234,11 @@ that group and an explicit group change is refused. Auction snapshots carry the
 exact profile and absolute capacity through crash resume.
 
 `already_selected` provides anti-affinity among placements evaluated against one
-auction snapshot, in every `EMPTIEST` branch including both cheapest fallbacks. It
-deprioritises and never excludes. The `CHEAPEST` policy ignores it. It does not
-provide balancing across separate runs.
+auction snapshot, in the preferred-pool `EMPTIEST` branches: the ranked selection
+and both cheapest fallbacks (profile unavailable, capacity incomplete). It
+deprioritises and never excludes. `first_eligible_fallback` (no preferred bid
+arrived) ignores it, as the `CHEAPEST` policy does. It does not provide balancing
+across separate runs.
 
 ### Crash resume
 
