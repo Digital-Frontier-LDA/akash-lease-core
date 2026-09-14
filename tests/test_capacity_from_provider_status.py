@@ -298,3 +298,56 @@ def test_a_valid_pair_alongside_a_corrupt_one_still_measures_the_valid_dimension
     assert cap.cpu is None
     assert cap.memory == pytest.approx(0.25)
     assert cap.available_fraction() == pytest.approx(0.25)
+
+
+@pytest.mark.parametrize(
+    ("allocatable", "available"),
+    [
+        pytest.param({"cpu": 10**400}, {"cpu": 10**400}, id="both-halves-huge"),
+        pytest.param({"cpu": 10**400}, {"cpu": 4_000}, id="total-huge"),
+        pytest.param({"cpu": 4_000}, {"cpu": 10**400}, id="free-huge"),
+    ],
+)
+def test_an_int_above_float_range_is_UNREADABLE_never_an_OverflowError(
+    allocatable: dict, available: dict
+) -> None:
+    """⛔ REGRESSION, #52. ``json.loads`` parses a 401-digit integer without
+    complaint, and ``math.isfinite`` raised ``OverflowError`` converting it to
+    float — a second failure mode the auction would have had to catch, breaking
+    the adapter's documented promise that a malformed payload never raises.
+
+    The pair is dropped whole, like every other unreadable quantity: a number
+    that cannot be represented is not evidence, and clamping it to the float
+    ceiling would let corrupt data prove a workload fits.
+    """
+    cap = from_provider_status(_one_node(allocatable, available))  # must not raise
+    assert cap.cpu is None
+    assert cap.cpu_millicores_available is None
+    assert (
+        cap.fit(ResourceProfile(cpu_millicores=500)) is CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+    )
+
+
+def test_a_huge_int_drops_only_its_dimension_like_any_corrupt_quantity() -> None:
+    """The #52 fix must reuse the per-dimension drop, not poison the node: good
+    memory alongside an out-of-range CPU is still a real measurement."""
+    cap = from_provider_status(
+        _one_node({"cpu": 10**400, "memory": 200}, {"cpu": 4_000, "memory": 50})
+    )
+    assert cap.cpu is None
+    assert cap.memory == pytest.approx(0.25)
+
+
+def test_large_ints_inside_float_range_still_read_exactly() -> None:
+    """Control for #52: 64 cores and an exabyte are ordinary provider numbers.
+    The unreadable verdict must start where float representation ends, not at
+    "uncomfortably large"."""
+    status = _one_node(
+        {"cpu": 64_000, "memory": 10**18, "storage_ephemeral": 10**18, "gpu": 0},
+        {"cpu": 32_000, "memory": 5 * 10**17, "storage_ephemeral": 10**17, "gpu": 0},
+    )
+    cap = from_provider_status(status)
+    assert cap.cpu_millicores_available == 32_000
+    assert cap.memory_bytes_available == 5 * 10**17
+    assert cap.storage_bytes_available == 10**17
+    assert cap.fit(ResourceProfile(cpu_millicores=500)) is CapacityFit.FIT
