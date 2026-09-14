@@ -57,11 +57,31 @@ jobs:
           fi
           echo "TAG_VERSION=${TAG_VERSION}" >> "$GITHUB_ENV"
 
+      # ⛔ THE BACKEND IS PINNED, NOT JUST THE SOURCE (#50 L5). A consumer pins the
+      #   wheel's sha256, and those bytes include the `Generator: hatchling X.Y.Z` line
+      #   and whatever the backend writes. Unpinned, a reproducible release is only a
+      #   property of whichever hatchling PyPI served that day. `--no-isolation` is
+      #   what makes these pins the ones that build: an isolated build would install
+      #   pyproject's unpinned `hatchling` into a fresh environment and ignore them.
+      #   Measured: this exact set rebuilds the v0.15.0 tag tree to the published
+      #   sha256 4c4845e798fade4e2cf750ee8426d40f5eb0a74d2bc4b866be52b636501769a7.
+      #   `--no-deps` makes the set CLOSED, not merely pinned: a dependency missing
+      #   from this list is not silently resolved from PyPI -- build's own check
+      #   fails ("hatchling -> tomlkit>=0.11.1 ... not installed"). Bump
+      #   deliberately, and re-measure a published tag when you do.
       - name: Build sdist and wheel
         run: |
           set -euo pipefail
-          python3 -m pip install --quiet build
-          python3 -m build
+          python3 -m pip install --quiet --no-deps \
+            build==1.6.1 \
+            hatchling==1.32.0 \
+            packaging==26.3 \
+            pathspec==1.1.1 \
+            pluggy==1.6.0 \
+            pyproject_hooks==1.2.0 \
+            tomlkit==0.15.1 \
+            trove-classifiers==2026.6.1.19
+          python3 -m build --no-isolation
 
       # ⚠ Building the right version is not the same as EMITTING the right
       #   filename. hatchling normalises `akash-lease-core` to `akash_lease_core`,

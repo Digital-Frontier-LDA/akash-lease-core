@@ -199,11 +199,9 @@ def test_partial_inventory_can_prove_fit_but_cannot_prove_emptiest() -> None:
     assert partial.available_fraction_for(profile) is None
     result = _evaluate([("partial", "9", partial), ("complete", "1", complete)], profile)
 
+    # Provider-scoped (#50): the partial provider leaves the ranking, not the auction's mode.
     assert result.selected.provider == "complete"
-    assert (
-        result.selection_reason
-        is SelectionReason.EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST
-    )
+    assert result.selection_reason is SelectionReason.EMPTIEST_PREFERRED
     assert [item.provider for item in result.considered] == ["complete", "partial"]
 
 
@@ -230,7 +228,8 @@ def test_ranking_completeness_call_site_changes_the_auction_effect(
 
     assert normal.selected.provider == "complete"
     assert mutated.selected.provider == "partial"
-    assert normal.selection_reason is not mutated.selection_reason
+    assert [item.provider for item in normal.considered] == ["complete", "partial"]
+    assert [item.provider for item in mutated.considered] == ["partial", "complete"]
     assert mutated.selection_reason is SelectionReason.EMPTIEST_PREFERRED
 
 

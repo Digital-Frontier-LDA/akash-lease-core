@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, Inexact, Rounded, localcontext
 from enum import Enum
 from fractions import Fraction
 from typing import TypeAlias
@@ -338,6 +338,10 @@ class ProviderCapacity:
         GPUs at all is *not applicable* on that dimension; scoring it as 0% free
         would rank every CPU-only provider as completely full and hand every GPU
         provider the auction regardless of contention.
+
+        ⚠ Without ``node_capacities`` each ``available`` is taken to be the provider's
+        COMPLETE free total: :meth:`fit` reads an aggregate below the request as proven
+        ``insufficient_capacity``. Pass a node list when the aggregate may omit nodes.
         """
         unknown = set(dims) - set(_DIMENSIONS)
         if unknown:
@@ -403,6 +407,16 @@ class ProviderCapacity:
                 aggregate_fits = False
 
         if self.node_capacities is None:
+            # ⭐ The aggregate is the whole provider's free total here, so a request
+            # above it cannot be placed by ANY distribution: that is proven, not
+            # unreadable (#50 L4). A sufficient aggregate still proves nothing about
+            # same-node fit, so that half stays unreadable.
+            if not aggregate_fits:
+                return CapacityFit.INSUFFICIENT_CAPACITY
+            return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
+        if self._contradicts_nodes(profile):
+            # ⛔ Evidence that disagrees with itself proves neither FIT nor
+            # INSUFFICIENT_CAPACITY, in either direction (#50 L3).
             return CapacityFit.REQUIRED_DIMENSION_UNREADABLE
         readable_nodes = tuple(
             node
@@ -420,6 +434,31 @@ class ProviderCapacity:
         if placement_fit is CapacityFit.PLACEMENT_SEARCH_UNSUPPORTED:
             return placement_fit
         return CapacityFit.INSUFFICIENT_CAPACITY
+
+    def _contradicts_nodes(self, profile: ResourceProfile) -> bool:
+        """Whether the aggregate and the node list cannot both be true.
+
+        Nodes that report a dimension can only add up to AT MOST the aggregate:
+        an aggregate may omit a node that cannot be read (the provider-status
+        adapter sums only readable nodes), but never contain less than the nodes
+        it summarises. When every node reports the dimension, the two must be
+        equal. Anything else is a snapshot that disagrees with itself.
+        """
+
+        nodes = self.node_capacities or ()
+        for dimension in profile.requested_dimensions:
+            aggregate = getattr(self, _AVAILABLE_FIELDS[dimension])
+            exact_aggregate = None if aggregate is None else _exact_quantity(aggregate)
+            values = [getattr(node, _AVAILABLE_FIELDS[dimension]) for node in nodes]
+            readable = [_exact_quantity(value) for value in values if value is not None]
+            if exact_aggregate is None or any(value is None for value in readable):
+                continue  # unsupported arithmetic is typed by the placement search
+            node_sum = sum(value for value in readable if value is not None)
+            if node_sum > exact_aggregate:
+                return True
+            if len(readable) == len(values) and node_sum != exact_aggregate:
+                return True
+        return False
 
     def available_fraction_for(self, profile: ResourceProfile) -> float | None:
         """Binding fraction only when fit and the ranking population are both proven."""
@@ -477,14 +516,36 @@ def _usable(value: object) -> bool:
     return math.isfinite(value) and value >= 0
 
 
+def _exact_decimal_sum(values: list[Decimal]) -> Decimal:
+    """Sum finite decimals with no rounding, however many digits they need.
+
+    ⛔ The default context keeps 28 significant digits. Summing there rounds the
+    aggregate while each node keeps its exact value, so the snapshot would disagree
+    with itself and the aggregate/node contradiction check would read a healthy
+    provider as unreadable (10**28 + 1 does it with integers). Precision grows until
+    the sum is exact instead.
+    """
+
+    precision = 28
+    while True:
+        with localcontext() as context:
+            context.prec = precision
+            context.traps[Inexact] = True
+            context.traps[Rounded] = True
+            try:
+                return sum(values, Decimal(0))
+            except (Inexact, Rounded):
+                precision *= 2
+
+
 def _summarize_nodes(
     nodes: object,
 ) -> tuple[dict[str, tuple[float, float] | None], tuple[NodeCapacity, ...]] | None:
     """Retain each node's free units while summing provider-wide totals."""
     if not isinstance(nodes, (list, tuple)) or not nodes:
         return None
-    totals: dict[str, Decimal] = {ours: Decimal(0) for ours, _ in _STATUS_DIMENSIONS}
-    frees: dict[str, Decimal] = {ours: Decimal(0) for ours, _ in _STATUS_DIMENSIONS}
+    total_parts: dict[str, list[Decimal]] = {ours: [] for ours, _ in _STATUS_DIMENSIONS}
+    free_parts: dict[str, list[Decimal]] = {ours: [] for ours, _ in _STATUS_DIMENSIONS}
     overreported: set[str] = set()
     node_capacities: list[NodeCapacity] = []
     seen = False
@@ -525,8 +586,8 @@ def _summarize_nodes(
                 continue
             exact_total = Decimal(total) if isinstance(total, int) else Decimal(str(total))
             exact_free = Decimal(free) if isinstance(free, int) else Decimal(str(free))
-            totals[ours] += exact_total
-            frees[ours] += exact_free
+            total_parts[ours].append(exact_total)
+            free_parts[ours].append(exact_free)
             node_free[_AVAILABLE_FIELDS[ours]] = (
                 int(exact_free) if exact_free == exact_free.to_integral_value() else exact_free
             )
@@ -538,6 +599,8 @@ def _summarize_nodes(
     #    raise ValueError, breaking this module's documented promise that a
     #    malformed payload yields an unreadable capacity rather than an exception.
     #    Found by CodeRabbit on #26.
+    totals = {ours: _exact_decimal_sum(parts) for ours, parts in total_parts.items()}
+    frees = {ours: _exact_decimal_sum(parts) for ours, parts in free_parts.items()}
     for ours, _ in _STATUS_DIMENSIONS:
         if not math.isfinite(totals[ours]) or not math.isfinite(frees[ours]):
             return None

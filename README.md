@@ -53,7 +53,7 @@ logic.
 The effective consumer pins still predate the identity contracts:
 
 ```text
-akash-lease-core main   0.15.0
+akash-lease-core main   0.15.1
 Blazing-Back            v0.9.0   control-plane/api/requirements.txt:88
                         v0.9.0   control-plane/workers/requirements.txt:73
 just-akash              v0.9.0   uv.lock (resolved)
@@ -177,16 +177,31 @@ fail closed because unlike currencies cannot be compared safely.
 whole group and that every replica can be assigned to a node while consuming
 that node's CPU, memory, storage, and GPU headroom. It then ranks by the binding
 free fraction across only the dimensions the group requests. A zero GPU request
-therefore cannot make a CPU-only workload follow GPU pressure. Missing aggregate
-or possibly-relevant per-node capacity for a requested dimension remains
-unreadable unless the readable nodes already prove the full placement; measured
-but insufficient capacity is a distinct `BidRejectionReason` value.
-Known nodes may therefore prove `FIT` while an unreadable sibling remains. That
-partial inventory can never prove the provider-wide free fraction used to rank
-`EMPTIEST`: the auction falls back to deterministic cheapest selection with the
-typed reason `emptiest_capacity_incomplete_fell_back_to_cheapest`. Silently
-omitting an unreadable node from the fraction could otherwise manufacture an
-emptiest winner.
+therefore cannot make a CPU-only workload follow GPU pressure. A missing
+aggregate for a requested dimension is unreadable. With an aggregate but no node
+list at all, an aggregate below the request is `insufficient_capacity` -- no
+distribution can place it -- while a sufficient one stays unreadable, because
+same-node fit is unproven. That rule assumes a node-less aggregate is the
+provider's COMPLETE free total. Possibly-relevant per-node capacity that cannot be
+read stays unreadable unless the readable nodes already prove the full placement;
+measured but insufficient capacity is a distinct `BidRejectionReason` value.
+
+An aggregate that contradicts its own node list is `required_capacity_unreadable`,
+in both directions, and never a proven verdict: readable nodes that add up to MORE
+than the aggregate (it may omit unreadable nodes, never hold less), or a complete
+node list whose sum differs from it. Both sides are compared exactly as
+`Fraction`s, and `from_provider_status` sums node values without rounding so its
+own snapshots always agree. ⚠ A consumer that builds `from_totals` from floats
+whose node sum rounds differently from its aggregate will now read unreadable.
+
+Known nodes may prove `FIT` while an unreadable sibling remains. That partial
+inventory can never prove the provider-wide free fraction used to rank `EMPTIEST`,
+so degradation is provider-scoped: such a provider stays eligible but ranks after
+every provider whose fraction is proven, among the unproven ones by price. The
+auction reports `emptiest_capacity_incomplete_fell_back_to_cheapest` only when an
+unranked provider actually wins (every bidder partial, or every ranked bidder
+already selected). Silently omitting an unreadable node from the fraction could
+otherwise manufacture an emptiest winner.
 The placement proof is exact but NP-complete in the general case. It explores at
 most `PLACEMENT_SEARCH_STATE_LIMIT` canonical states (currently 100,000) during
 one synchronous `Auction.evaluate()` call. Reaching that bound returns the typed
@@ -195,7 +210,8 @@ one synchronous `Auction.evaluate()` call. Reaching that bound returns the typed
 limit, so low-branching groups with thousands of replicas remain supported.
 
 Akash CPU, memory, storage, and GPU units supplied as integers retain arbitrary
-precision through aggregate and per-node fit. `Decimal` values are also exact.
+precision through aggregate and per-node fit, including the aggregates
+`from_provider_status` sums from node values. `Decimal` values are also exact.
 Finite floats below `2**53` are compared as their exact binary values; larger
 floats cannot distinguish adjacent integral units and therefore return
 `placement_search_unsupported`. Available fractions remain floating-point ranking
@@ -218,7 +234,11 @@ that group and an explicit group change is refused. Auction snapshots carry the
 exact profile and absolute capacity through crash resume.
 
 `already_selected` provides anti-affinity among placements evaluated against one
-auction snapshot. It does not provide balancing across separate runs.
+auction snapshot, in the preferred-pool `EMPTIEST` branches: the ranked selection
+and both cheapest fallbacks (profile unavailable, capacity incomplete). It
+deprioritises and never excludes. `first_eligible_fallback` (no preferred bid
+within the collection window) ignores it, as the `CHEAPEST` policy does. It does not provide balancing
+across separate runs.
 
 ### Crash resume
 

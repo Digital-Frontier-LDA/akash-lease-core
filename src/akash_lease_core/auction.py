@@ -899,59 +899,74 @@ class Auction:
                 + ", ".join(denominations)
             )
 
-        if preferred:
-            emptiest = self.policy.preferred_selection is PreferredSelection.EMPTIEST
-            profiles_complete = all(item.resource_profile is not None for item in pool)
-            ranking_complete = profiles_complete and all(
-                item.capacity is not None
-                and item.resource_profile is not None
-                and item.capacity.ranking_complete_for(item.resource_profile)
-                for item in pool
-            )
-            if emptiest and ranking_complete:
-                # ⭐ ANTI-AFFINITY FIRST, headroom second.
-                #
-                # A multi-region deployment evaluates several auctions against ONE
-                # capacity snapshot. Without this term all of them see the same
-                # emptiest provider and all of them choose it -- a thundering herd
-                # that is strictly WORSE than cheapest-first, which at least has a
-                # stable price tiebreak. Emptiest-first only delivers "room in all
-                # three" if a provider already taken this round steps aside.
-                #
-                # ⚠ It DEPRIORITISES, it does not exclude. If the already-chosen
-                # provider is the only preferred bidder, taking it beats failing
-                # to place -- so this changes the ORDER, never the eligibility.
-                taken = already_selected or frozenset()
+        if preferred and self.policy.preferred_selection is PreferredSelection.EMPTIEST:
+            # ⭐ ANTI-AFFINITY FIRST, in EVERY emptiest branch -- degraded ones included.
+            #
+            # A multi-region deployment evaluates several auctions against ONE
+            # capacity snapshot. Without this term all of them see the same
+            # emptiest provider and all of them choose it -- a thundering herd
+            # that is strictly WORSE than cheapest-first, which at least has a
+            # stable price tiebreak. Emptiest-first only delivers "room in all
+            # three" if a provider already taken this round steps aside.
+            #
+            # ⛔ The cheapest fallbacks below honour it too (#50). Degradation is now
+            # reachable from ONE partially readable node on ANY bidder, so a fallback
+            # that ignored `taken` would let every region pile onto one provider.
+            #
+            # ⚠ It DEPRIORITISES, it does not exclude. If the already-chosen
+            # provider is the only preferred bidder, taking it beats failing
+            # to place -- so this changes the ORDER, never the eligibility.
+            taken = already_selected or frozenset()
+
+            def cheapest(item: BidObservation) -> tuple:
+                return (item.provider in taken, item.price, item.provider, item.bid_key)
+
+            if not all(item.resource_profile is not None for item in pool):
+                # ⛔ A degraded selection MUST NOT report as the mode that was
+                # asked for. Silently returning "cheapest_preferred" here would
+                # make an unmeasurable fleet indistinguishable from a fleet that
+                # was measured and happened to agree.
+                selected = min(pool, key=cheapest)
+                reason = SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
+                considered = tuple(sorted(pool, key=cheapest))
+            else:
+                # ⛔ DEGRADATION IS PROVIDER-SCOPED (#50). A provider whose nodes cannot
+                # all be read can still prove FIT, but not its free fraction. That
+                # removes IT from the emptiest ranking -- it must not remove EMPTIEST
+                # from the whole auction, or one unreadable node on an unrelated bidder
+                # hands the decision back to price. Incomplete providers therefore rank
+                # after every complete one, among themselves by price.
+                def ranked(item: BidObservation) -> bool:
+                    return (
+                        item.capacity is not None
+                        and item.resource_profile is not None
+                        and item.capacity.ranking_complete_for(item.resource_profile)
+                    )
 
                 def rank(item: BidObservation) -> tuple:
+                    if not ranked(item):
+                        return (item.provider in taken, True, 0.0, *cheapest(item)[1:])
                     if item.capacity is None or item.resource_profile is None:
                         raise AssertionError("fit-checked pool lost capacity evidence")
                     frac = item.capacity.available_fraction_for(item.resource_profile)
                     if frac is None:
                         raise AssertionError("fit-checked pool lost its requested-dimension score")
-                    return (item.provider in taken, -frac, item.price, item.provider, item.bid_key)
+                    return (item.provider in taken, False, -frac, *cheapest(item)[1:])
 
                 selected = min(pool, key=rank)
-                reason = SelectionReason.EMPTIEST_PREFERRED
-                considered = tuple(sorted(pool, key=rank))
-            else:
-                selected = min(pool, key=lambda item: (item.price, item.provider, item.bid_key))
-                # ⛔ A degraded selection MUST NOT report as the mode that was
-                # asked for. Silently returning "cheapest_preferred" here would
-                # make an unmeasurable fleet indistinguishable from a fleet that
-                # was measured and happened to agree.
+                # A winner the ranking could not score was chosen by price, and says so.
                 reason = (
-                    (
-                        SelectionReason.EMPTIEST_REQUEST_PROFILE_UNAVAILABLE_FELL_BACK_TO_CHEAPEST
-                        if not profiles_complete
-                        else SelectionReason.EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST
-                    )
-                    if emptiest
-                    else SelectionReason.CHEAPEST_PREFERRED
+                    SelectionReason.EMPTIEST_PREFERRED
+                    if ranked(selected)
+                    else SelectionReason.EMPTIEST_CAPACITY_INCOMPLETE_FELL_BACK_TO_CHEAPEST
                 )
-                considered = tuple(
-                    sorted(pool, key=lambda item: (item.price, item.provider, item.bid_key))
-                )
+                considered = tuple(sorted(pool, key=rank))
+        elif preferred:
+            selected = min(pool, key=lambda item: (item.price, item.provider, item.bid_key))
+            reason = SelectionReason.CHEAPEST_PREFERRED
+            considered = tuple(
+                sorted(pool, key=lambda item: (item.price, item.provider, item.bid_key))
+            )
         else:
             selected = min(pool, key=lambda item: (item.observed_at, item.provider, item.bid_key))
             reason = SelectionReason.FIRST_ELIGIBLE_FALLBACK
