@@ -510,10 +510,19 @@ def _usable(value: object) -> bool:
 
     ⚠ ``bool`` is an ``int`` subclass and must be rejected before the numeric
     check, or ``True`` contributes one unit of CPU.
+
+    ⚠ An ``int`` outside float range is UNREADABLE, never an exception (#52).
+    ``json.loads`` parses a 401-digit integer without complaint; converting it
+    to float for ``isfinite`` raised ``OverflowError`` out of the adapter. The
+    quantity is dropped like any other unreadable one — clamping it to the
+    float ceiling instead would let corrupt data prove a workload fits.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         return False
-    return math.isfinite(value) and value >= 0
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:
+        return False
 
 
 def _exact_decimal_sum(values: list[Decimal]) -> Decimal:
