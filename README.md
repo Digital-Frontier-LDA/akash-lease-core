@@ -373,6 +373,11 @@ atomic durable create/append and reread behavior around this contract.
 
 ## Creation admission and containment budget
 
+External brokers can recover exact canonical journal, prepared-operation, request
+and reservation bytes with the strict [durable recovery codec](docs/durable-recovery-codec.md).
+Decoding revalidates typed data and history; it never issues create authority or
+supplies database durability/authentication.
+
 `reserve_capacity` is the pure admission boundary used before any create side
 effect. Every operation must pass both a `(chain ID, signer owner)` aggregate
 budget and its exact `(chain ID, owner, authenticated producer issuer,
