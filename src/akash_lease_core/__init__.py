@@ -277,6 +277,16 @@ from .qualification import (
     evaluate_provider,
     qualified_set,
 )
+from .recovery_codec import (
+    MAX_RECOVERY_BYTES,
+    MAX_RECOVERY_DEPTH,
+    MAX_RECOVERY_NODES,
+    RecoveryDecodeError,
+    decode_admission_request,
+    decode_admission_state,
+    decode_create_journal,
+    decode_prepared_create,
+)
 from .wallets import (
     RejectedWallet,
     WalletCandidate,
@@ -300,6 +310,14 @@ from .workload_identity import (
 )
 
 __all__ = [
+    "MAX_RECOVERY_BYTES",
+    "MAX_RECOVERY_DEPTH",
+    "MAX_RECOVERY_NODES",
+    "RecoveryDecodeError",
+    "decode_admission_request",
+    "decode_admission_state",
+    "decode_create_journal",
+    "decode_prepared_create",
     "JOURNAL_SCHEMA_VERSION",
     "BackendIdentity",
     "BackendKind",
@@ -473,7 +491,7 @@ __all__ = [
     "select_batch",
 ]
 
-__version__ = "0.15.2"
+__version__ = "0.16.0"
 
 # ---------------------------------------------------------------------------
 # Binary frame protocol constants
