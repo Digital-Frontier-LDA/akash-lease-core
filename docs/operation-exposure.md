@@ -4,6 +4,24 @@ This additive, sans-I/O financial schema version 1 is introduced in package
 0.17.0. It adds no production issuer, policy default, networking, persistence or activation.
 Existing 0.16.1 journal, admission and recovery models/bytes stay unchanged.
 
+## Transaction-fee extension prepared for 0.18.0
+
+`TRANSACTION_FEE` proposes a fee-only effect after the confirmed original create.
+Its maximum debit must equal its exact native fee vector; it retains the original
+operation, deployment, creator leaf and lifetime maximum. It does not create a
+new capacity slot or authorize a cap amendment. Unknown signing and broadcast,
+and fees charged by failed transactions, remain in the retained operation.
+
+These are DATA constraints. An actual close transaction still needs a registered
+adapter to independently validate the complete transaction body and AuthInfo,
+including fee payer/granter, gas, public key, sequence and native attribution;
+the same durable financial CAS and independently authenticated ACK remain
+mandatory at the real signing and broadcast boundaries. Execution closure grants
+no financial release. Core 0.18.0 adds this purpose to the DATA schema. Core 0.17
+and SDK 1.47 do not support it; they must hold it until a coordinated new immutable
+consumer release is qualified. Preparing this source version does not publish a
+release or qualify a signing adapter.
+
 ## Two phases and authority
 
 1. A registered adapter obtains an **authenticated finite maximum proposal**
