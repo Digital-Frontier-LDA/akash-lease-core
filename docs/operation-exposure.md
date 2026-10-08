@@ -1,7 +1,7 @@
 # Durable operation exposure data contract
 
-This is additive, sans-I/O financial schema version 1. It adds no package
-version, production issuer, policy default, networking, persistence or activation.
+This additive, sans-I/O financial schema version 1 is introduced in package
+0.17.0. It adds no production issuer, policy default, networking, persistence or activation.
 Existing 0.16.1 journal, admission and recovery models/bytes stay unchanged.
 
 ## Two phases and authority
