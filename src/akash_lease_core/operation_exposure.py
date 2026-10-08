@@ -201,6 +201,7 @@ class FinancialEffectPurpose(str, Enum):
     CREATE = "create"
     DEPOSIT = "deposit"
     FEE_REFILL = "fee_refill"
+    TRANSACTION_FEE = "transaction_fee"
     GRANT = "grant"
     MINT = "mint"
     AMENDMENT = "amendment"
@@ -392,6 +393,13 @@ class FinancialEffectIntent:
             raise ValueError("financial debits must be typed vectors")
         if not self.maximum_debit.covers(self.fee_debit):
             raise ValueError("maximum debit must include its native fees")
+        if (
+            self.purpose is FinancialEffectPurpose.TRANSACTION_FEE
+            and self.maximum_debit != self.fee_debit
+        ):
+            raise ValueError(
+                "transaction fee intent must contain only its exact native fee vector"
+            )
 
 
 class FinancialEffectState(str, Enum):
